@@ -20,10 +20,10 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
 """
-Urwid example lazy directory browser / tree view
+Urwid example lazy directory browser / tree view.
 
 Features:
 - custom selectable widgets for files and directories
@@ -31,108 +31,161 @@ Features:
 - custom list walker for displaying widgets in a tree fashion
 """
 
+from __future__ import annotations
+
+import typing
+
 import urwid
-import os
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Hashable
+    from typing import NotRequired, Self
 
 
-class ExampleTreeWidget(urwid.TreeWidget):
-    """ Display widget for leaf nodes """
-    def get_display_text(self):
-        return self.get_node().get_value()['name']
+class SampleTree(typing.TypedDict):
+    """Data for a single node of the example tree: a name and, for a parent node, its children."""
+
+    name: str
+    children: NotRequired[list[SampleTree]]
 
 
-class ExampleNode(urwid.TreeNode):
-    """ Data storage object for leaf nodes """
-    def load_widget(self):
+_ExampleNode = typing.TypeVar("_ExampleNode", bound="ExampleNode | ExampleParentNode")
+
+
+class ExampleTreeWidget(urwid.TreeWidget[_ExampleNode]):
+    """Display widget for tree nodes, with connector lines and leaves lined up with their parents."""
+
+    leaf_icon = urwid.Text(urwid.TreeWidget.Symbols.SPACE)
+    connector_lines = True
+    line_attr = "line"
+
+    def get_display_text(self) -> str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]:
+        """Return the node's name to display."""
+        return self.get_node().get_value()["name"]
+
+
+class ExampleNode(urwid.TreeNode[SampleTree]):
+    """Data storage object for leaf nodes."""
+
+    def load_widget(self) -> ExampleTreeWidget[Self]:
+        """Return a new widget for this node."""
         return ExampleTreeWidget(self)
 
 
-class ExampleParentNode(urwid.ParentNode):
-    """ Data storage object for interior/parent nodes """
-    def load_widget(self):
+class ExampleParentNode(urwid.ParentNode[SampleTree]):
+    """Data storage object for interior/parent nodes."""
+
+    def load_widget(self) -> ExampleTreeWidget[Self]:
+        """Return a new widget for this node."""
         return ExampleTreeWidget(self)
 
-    def load_child_keys(self):
+    def load_child_keys(self) -> tuple[int, ...]:
+        """Return the indices of this node's children."""
         data = self.get_value()
-        return range(len(data['children']))
+        return tuple(range(len(data.get("children", []))))
 
-    def load_child_node(self, key):
-        """Return either an ExampleNode or ExampleParentNode"""
-        childdata = self.get_value()['children'][key]
+    def load_child_node(
+        self,
+        key: int,  # type: ignore[override]  # We have explicit type
+    ) -> ExampleParentNode | ExampleNode:
+        """Return the child node at a given index.
+
+        :param key: index of the child within this node's children
+        :returns: an :class:`ExampleParentNode` if the child has children of its own, an :class:`ExampleNode`
+                  otherwise
+        """
+        childdata = self.get_value().get("children", [])[key]
         childdepth = self.get_depth() + 1
-        if 'children' in childdata:
-            childclass = ExampleParentNode
-        else:
-            childclass = ExampleNode
-        return childclass(childdata, parent=self, key=key, depth=childdepth)
+        if "children" in childdata:
+            return ExampleParentNode(childdata, parent=self, key=key, depth=childdepth)
+
+        return ExampleNode(childdata, parent=self, key=key, depth=childdepth)
 
 
 class ExampleTreeBrowser:
-    palette = [
-        ('body', 'black', 'light gray'),
-        ('focus', 'light gray', 'dark blue', 'standout'),
-        ('head', 'yellow', 'black', 'standout'),
-        ('foot', 'light gray', 'black'),
-        ('key', 'light cyan', 'black','underline'),
-        ('title', 'white', 'black', 'bold'),
-        ('flag', 'dark gray', 'light gray'),
-        ('error', 'dark red', 'light gray'),
-        ]
+    """Interactive browser for the example tree."""
 
-    footer_text = [
-        ('title', "Example Data Browser"), "    ",
-        ('key', "UP"), ",", ('key', "DOWN"), ",",
-        ('key', "PAGE UP"), ",", ('key', "PAGE DOWN"),
+    palette: typing.ClassVar[list[tuple[str, str, str] | tuple[str, str, str, str]]] = [
+        ("body", "default", "default"),
+        ("line", "dark gray", "default"),
+        ("focus", "default,standout", "default", "standout"),
+        ("head", "yellow", "black", "standout"),
+        ("foot", "light gray", "black"),
+        ("key", "light cyan", "black", "underline"),
+        ("title", "white", "black", "bold"),
+        ("flag", "dark gray", "default"),
+        ("error", "dark red", "default"),
+    ]
+
+    footer_text: typing.ClassVar[list[tuple[str, str] | str]] = [
+        ("title", "Example Data Browser"),
+        "    ",
+        ("key", "UP"),
+        ",",
+        ("key", "DOWN"),
+        ",",
+        ("key", "PAGE UP"),
+        ",",
+        ("key", "PAGE DOWN"),
         "  ",
-        ('key', "+"), ",",
-        ('key', "-"), "  ",
-        ('key', "LEFT"), "  ",
-        ('key', "HOME"), "  ",
-        ('key', "END"), "  ",
-        ('key', "Q"),
-        ]
+        ("key", "+"),
+        ",",
+        ("key", "-"),
+        "  ",
+        ("key", "LEFT"),
+        "  ",
+        ("key", "HOME"),
+        "  ",
+        ("key", "END"),
+        "  ",
+        ("key", "Q"),
+    ]
 
-    def __init__(self, data=None):
+    def __init__(self, data: SampleTree) -> None:
+        """Initialize the tree view rooted at `data`."""
         self.topnode = ExampleParentNode(data)
         self.listbox = urwid.TreeListBox(urwid.TreeWalker(self.topnode))
         self.listbox.offset_rows = 1
-        self.header = urwid.Text( "" )
-        self.footer = urwid.AttrWrap( urwid.Text( self.footer_text ),
-            'foot')
+        self.header = urwid.Text("")
+        self.footer = urwid.AttrMap(urwid.Text(self.footer_text), "foot")
         self.view = urwid.Frame(
-            urwid.AttrWrap( self.listbox, 'body' ),
-            header=urwid.AttrWrap(self.header, 'head' ),
-            footer=self.footer )
+            urwid.AttrMap(self.listbox, "body"),
+            header=urwid.AttrMap(self.header, "head"),
+            footer=self.footer,
+        )
 
-    def main(self):
+    def main(self) -> None:
         """Run the program."""
-
-        self.loop = urwid.MainLoop(self.view, self.palette,
-            unhandled_input=self.unhandled_input)
+        self.loop = urwid.MainLoop(self.view, self.palette, unhandled_input=self.unhandled_input)
         self.loop.run()
 
-    def unhandled_input(self, k):
-        if k in ('q','Q'):
-            raise urwid.ExitMainLoop()
+    def unhandled_input(self, k: str | tuple[str, int, int, int]) -> None:
+        """Handle keys not consumed by the widgets: :kbd:`q` to exit.
+
+        :param k: unhandled key or mouse event
+        :raises urwid.ExitMainLoop: when the user presses :kbd:`q`
+        """
+        if k in {"q", "Q"}:
+            raise urwid.ExitMainLoop
 
 
-def get_example_tree():
-    """ generate a quick 100 leaf tree for demo purposes """
-    retval = {"name":"parent","children":[]}
+def get_example_tree() -> SampleTree:
+    """Generate a quick 100 leaf tree for demo purposes.
+
+    :returns: a parent node with 10 children, each having 10 children of their own
+    """
+    children: list[SampleTree] = []
     for i in range(10):
-        retval['children'].append({"name":"child " + str(i)})
-        retval['children'][i]['children']=[]
-        for j in range(10):
-            retval['children'][i]['children'].append({"name":"grandchild " +
-                                                      str(i) + "." + str(j)})
-    return retval
+        grandchildren: list[SampleTree] = [{"name": "grandchild " + str(i) + "." + str(j)} for j in range(10)]
+        children.append({"name": f"child {i!s}", "children": grandchildren})
+    return {"name": "parent", "children": children}
 
 
-def main():
+def main() -> None:
+    """Run the tree sample example program."""
     sample = get_example_tree()
     ExampleTreeBrowser(sample).main()
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
-

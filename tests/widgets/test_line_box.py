@@ -1,0 +1,351 @@
+from __future__ import annotations
+
+import unittest
+
+import urwid
+from urwid.util import get_encoding
+
+
+class LineBoxTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.old_encoding = get_encoding()
+        urwid.set_encoding("utf-8")
+
+    def tearDown(self) -> None:
+        urwid.set_encoding(self.old_encoding)
+
+    def test_linebox_pack(self):
+        # Bug #346 'pack' Padding does not run with LineBox
+        t = urwid.Text("AAA\nCCC\nDDD")
+        size = t.pack()
+        l = urwid.LineBox(t)
+
+        self.assertEqual(l.pack()[0], size[0] + 2)
+        self.assertEqual(l.pack()[1], size[1] + 2)
+
+    def test_border(self):
+        wrapped = urwid.Text("Text\non\nfour\nlines", align=urwid.CENTER)
+        l = urwid.LineBox(wrapped, tlcorner="╭", trcorner="╮", blcorner="╰", brcorner="╯")
+        cols, rows = 7, 6
+        self.assertEqual((cols, rows), l.pack(()))
+
+        canvas = l.render(())
+        self.assertEqual(cols, canvas.cols())
+        self.assertEqual(rows, canvas.rows())
+
+        self.assertEqual(
+            [
+                "╭─────╮",
+                "│ Text│",
+                "│  on │",
+                "│ four│",
+                "│lines│",
+                "╰─────╯",
+            ],
+            [line.decode("utf-8") for line in canvas.text],
+        )
+
+    def test_header(self):
+        wrapped = urwid.Text("Some text")
+        l = urwid.LineBox(wrapped, title="Title", tlcorner="╭", trcorner="╮", blcorner="╰", brcorner="╯")
+        cols, rows = 11, 3
+        self.assertEqual((cols, rows), l.pack(()))
+
+        canvas = l.render(())
+        self.assertEqual(cols, canvas.cols())
+        self.assertEqual(rows, canvas.rows())
+
+        self.assertEqual(
+            [
+                "╭─ Title ─╮",
+                "│Some text│",
+                "╰─────────╯",
+            ],
+            [line.decode("utf-8") for line in canvas.text],
+        )
+
+        l.set_title("New")
+        self.assertEqual(
+            [
+                "╭── New ──╮",
+                "│Some text│",
+                "╰─────────╯",
+            ],
+            [line.decode("utf-8") for line in l.render(()).text],
+        )
+
+    def test_long_title_is_cut(self) -> None:
+        """A title wider than the top line is cut with an ellipsis between the corners, for every alignment."""
+        expected = ["┌ a very…┐", "│x       │", "└────────┘"]
+        for align in (urwid.LEFT, urwid.CENTER, urwid.RIGHT):
+            with self.subTest(align=align):
+                box = urwid.LineBox(urwid.Text("x"), title="a very long title here", title_align=align)
+                self.assertEqual(3, box.rows((10,)))
+                self.assertEqual(expected, [line.decode("utf-8") for line in box.render((10,)).text])
+                self.assertEqual(expected, [line.decode("utf-8") for line in box.render((10, 3)).text])
+
+            with self.subTest("set_title", align=align):
+                box = urwid.LineBox(urwid.Text("x"), title="ab", title_align=align)
+                box.render((10,))
+                box.set_title("a very long title here")
+                self.assertEqual(expected, [line.decode("utf-8") for line in box.render((10,)).text])
+
+    def test_title_markup(self) -> None:
+        box = urwid.LineBox(urwid.Text("Some text"), title=[("key", "F1"), " Help"])
+        self.assertEqual(
+            ["┌─ F1 Help ─┐", "│Some text  │", "└───────────┘"],
+            [line.decode("utf-8") for line in box.render((13,)).text],
+        )
+        self.assertEqual((" F1 Help ", [(None, 1), ("key", 2)]), box.title_widget.get_text())
+
+        box.set_title(("key", "New"))
+        self.assertEqual((" New ", [(None, 1), ("key", 3)]), box.title_widget.get_text())
+
+        box.set_title(b"Bytes")
+        self.assertEqual(" Bytes ", box.title_widget.text)
+
+        box = urwid.LineBox(urwid.Text("Some text"), title=["Title"], title_attr="title")
+        self.assertEqual((" Title ", [("title", 7)]), box.title_widget.get_text())
+
+        for empty in ([], b"", ("key", ""), ["", ("key", b"")]):
+            with self.subTest(title=empty):
+                box = urwid.LineBox(urwid.Text("abc"), title=empty)
+                self.assertEqual(
+                    ["┌───┐", "│abc│", "└───┘"],
+                    [line.decode("utf-8") for line in box.render(()).text],
+                )
+                box.set_title(empty)
+                self.assertEqual("", box.title_widget.text)
+                self.assertIsNone(urwid.LineBox(urwid.Text("abc"), title=empty, tline="").tline_widget)
+
+        class BracketTitleLineBox(urwid.LineBox):
+            def format_title(self, text: object) -> str:
+                return f"[{text}]"
+
+        self.assertIsNone(BracketTitleLineBox(urwid.Text("abc"), tline="").tline_widget)
+
+    def test_negative(self):
+        wrapped = urwid.Text("")
+        with self.assertRaises(ValueError) as ctx:
+            l = urwid.LineBox(wrapped, title="Title", tline="")
+
+        self.assertEqual("Cannot have a title when tline is empty string", str(ctx.exception))
+
+        l = urwid.LineBox(wrapped, tline="")
+        with self.assertRaises(ValueError) as ctx:
+            l.set_title("Fail")
+
+        self.assertEqual("Cannot set title when tline is unset", str(ctx.exception))
+
+    def test_partial_contour(self):
+        def mark_pressed(btn: urwid.Button) -> None:
+            nonlocal pressed
+
+            pressed = True
+
+        pressed = False
+        wrapped = urwid.Button("Wrapped", on_press=mark_pressed)
+
+        with self.subTest("No top line -> no top"):
+            l = urwid.LineBox(wrapped, tline="")
+            cols, rows = 13, 2
+            self.assertEqual((cols, rows), l.pack(()))
+
+            canvas = l.render(())
+            self.assertEqual(cols, canvas.cols())
+            self.assertEqual(rows, canvas.rows())
+
+            self.assertEqual(
+                [
+                    "│< Wrapped >│",
+                    "└───────────┘",
+                ],
+                [line.decode("utf-8") for line in canvas.text],
+            )
+            self.assertIsNone(l.keypress((), "enter"))
+            self.assertTrue(pressed)
+
+        pressed = False
+
+        with self.subTest("No right side elements -> no side"):
+            l = urwid.LineBox(wrapped, rline="")
+            cols, rows = 12, 3
+            self.assertEqual((cols, rows), l.pack(()))
+
+            canvas = l.render(())
+            self.assertEqual(cols, canvas.cols())
+            self.assertEqual(rows, canvas.rows())
+
+            self.assertEqual(
+                [
+                    "┌───────────",
+                    "│< Wrapped >",
+                    "└───────────",
+                ],
+                [line.decode("utf-8") for line in canvas.text],
+            )
+            self.assertIsNone(l.keypress((), "enter"))
+            self.assertTrue(pressed)
+
+        pressed = False
+
+        with self.subTest("No left side elements -> no side"):
+            l = urwid.LineBox(wrapped, lline="")
+            cols, rows = 12, 3
+            self.assertEqual((cols, rows), l.pack(()))
+
+            canvas = l.render(())
+            self.assertEqual(cols, canvas.cols())
+            self.assertEqual(rows, canvas.rows())
+
+            self.assertEqual(
+                [
+                    "───────────┐",
+                    "< Wrapped >│",
+                    "───────────┘",
+                ],
+                [line.decode("utf-8") for line in canvas.text],
+            )
+            self.assertIsNone(l.keypress((), "enter"))
+            self.assertTrue(pressed)
+
+        pressed = False
+
+        with self.subTest("No bottom line -> no bottom"):
+            l = urwid.LineBox(wrapped, bline="")
+            cols, rows = 13, 2
+            self.assertEqual((cols, rows), l.pack(()))
+
+            canvas = l.render(())
+            self.assertEqual(cols, canvas.cols())
+            self.assertEqual(rows, canvas.rows())
+
+            self.assertEqual(
+                [
+                    "┌───────────┐",
+                    "│< Wrapped >│",
+                ],
+                [line.decode("utf-8") for line in canvas.text],
+            )
+            self.assertIsNone(l.keypress((), "enter"))
+            self.assertTrue(pressed)
+
+        pressed = False
+
+    def test_columns_of_lineboxes(self):
+        # BUG #748
+        # Using PACK: width of widget 1 is 4, width of widget 2 is 5.
+        # With equal weight widget 1 will be rendered also 5.
+        columns = urwid.Columns(
+            [
+                (urwid.PACK, urwid.LineBox(urwid.Text("lol"), rline="", trcorner="", brcorner="")),
+                (urwid.PACK, urwid.LineBox(urwid.Text("wtf"), tlcorner="┬", blcorner="┴")),
+            ]
+        )
+        canvas = columns.render(())
+        self.assertEqual(
+            [
+                "┌───┬───┐",
+                "│lol│wtf│",
+                "└───┴───┘",
+            ],
+            [line.decode("utf-8") for line in canvas.text],
+        )
+
+    def test_replace_widget(self):
+        old_widget = urwid.Text("some text")
+        lb_widget = urwid.LineBox(old_widget)
+        canvas = lb_widget.render(())
+        self.assertEqual(
+            [
+                "┌─────────┐",
+                "│some text│",
+                "└─────────┘",
+            ],
+            [line.decode("utf-8") for line in canvas.text],
+        )
+        self.assertIs(old_widget, lb_widget.original_widget)
+        new_widget = urwid.widget.Button("now it's a button")
+        lb_widget.original_widget = new_widget
+        canvas = lb_widget.render(())
+        self.assertEqual(
+            [
+                "┌─────────────────────┐",
+                "│< now it's a button >│",
+                "└─────────────────────┘",
+            ],
+            [line.decode("utf-8") for line in canvas.text],
+        )
+        self.assertIs(new_widget, lb_widget.original_widget)
+
+    def test_title_attr_and_unicode_corners(self) -> None:
+        box = urwid.LineBox(
+            urwid.Text("body"),
+            title="Title",
+            title_align=urwid.CENTER,
+            title_attr="title",
+            tlcorner="┌",
+            tline="─",
+            lline="│",
+            trcorner="┐",
+            blcorner="└",
+            rline="│",
+            bline="─",
+            brcorner="┘",
+        )
+
+        self.assertEqual((6, 3), box.pack(()))
+        self.assertEqual(
+            ["┌ Ti…┐", "│body│", "└────┘"],
+            [line.decode("utf-8") for line in box.render(()).text],
+        )
+        self.assertEqual(
+            ["┌─ Title ─┐", "│body     │", "└─────────┘"],
+            [line.decode("utf-8") for line in box.render((11,)).text],
+        )
+
+    def test_follows_original_widget(self) -> None:
+        box = urwid.LineBox(urwid.Text("x"))
+        self.assertFalse(box.selectable())
+        self.assertEqual(frozenset((urwid.FLOW, urwid.FIXED)), box.sizing())
+        self.assertEqual(["┌───┐", "│x  │", "└───┘"], [line.decode("utf-8") for line in box.render((5,)).text])
+
+        box.original_widget = urwid.Edit("y")
+        self.assertTrue(box.selectable())
+        self.assertEqual(frozenset((urwid.FLOW,)), box.sizing())
+        self.assertEqual(["┌───┐", "│y  │", "└───┘"], [line.decode("utf-8") for line in box.render((5,)).text])
+
+    def test_fixed_only_widget(self) -> None:
+        """A fixed-only widget renders fixed.
+
+        A replacement gets the column width its own sizing needs.
+        """
+        font = urwid.Thin3x3Font()
+        framed = ["│ ┐ ┌─┐│", "│ │ ┌─┘│", "│ ┴ └─ │", "└──────┘"]
+        replaced: urwid.LineBox[urwid.Widget] = urwid.LineBox(urwid.Text("x"))
+        replaced.original_widget = urwid.BigText("12", font)
+        replaced_no_top: urwid.LineBox[urwid.Widget] = urwid.LineBox(urwid.Text("x"), tline="")
+        replaced_no_top.original_widget = urwid.BigText("12", font)
+
+        for label, box, top in (
+            ("constructed", urwid.LineBox[urwid.Widget](urwid.BigText("12", font)), ["┌──────┐"]),
+            ("replaced a flow widget", replaced, ["┌──────┐"]),
+            ("replaced a flow widget, no top line", replaced_no_top, []),
+        ):
+            with self.subTest(label):
+                self.assertEqual(frozenset((urwid.FIXED,)), box.sizing())
+                self.assertEqual((8, len(top) + 4), box.pack(()))
+                self.assertEqual([*top, *framed], [line.decode("utf-8") for line in box.render(()).text])
+
+                box.original_widget = urwid.Text("y")
+                self.assertEqual(
+                    [*(["┌───┐"] if top else []), "│y  │", "└───┘"],
+                    [line.decode("utf-8") for line in box.render((5,)).text],
+                )
+
+    def test_render_cache_invalidated_on_replacement(self) -> None:
+        box = urwid.LineBox(urwid.Text("a"))
+        first = box.render((5,))
+        self.assertIs(first, box.render((5,)))
+        box.original_widget = urwid.Text("b")
+        self.assertIsNot(first, box.render((5,)))

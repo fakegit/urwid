@@ -5,31 +5,58 @@ Display Modules
 
 .. autoclass:: BaseScreen
 
-raw_display
+.. autoclass:: urwid.display.PaletteEntrySpecs
+
+RAW display
 -----------
 
-.. module:: urwid.raw_display
+.. module:: urwid.display.raw
 
 .. autoclass:: Screen
 
-curses_display
+Curses display
 --------------
 
-.. module:: urwid.curses_display
+.. module:: urwid.display.curses
 
 .. autoclass:: Screen
 
-web_display
+WEB display
 -----------
 
-.. module:: urwid.web_display
+.. module:: urwid.display.web
 
 .. autoclass:: Screen
 
-html_fragment
+WebSocket display
+-----------------
+
+.. module:: urwid.display.websocket
+
+.. autoclass:: Screen
+    :members: feed, close, closed
+
+.. autoclass:: Transport
+    :members:
+
+.. autoexception:: InvalidMessageError
+
+.. autofunction:: html_page
+
+.. autodata:: STATIC_FILES
+    :no-value:
+
+.. autoclass:: StaticFile
+    :members:
+
+.. autodata:: MAX_MESSAGE_LENGTH
+
+.. autodata:: MAX_PENDING_INPUT
+
+HTML fragment
 -------------
 
-.. module:: urwid.html_fragment
+.. module:: urwid.display.html_fragment
 
 .. autoclass:: HtmlGenerator
 
@@ -37,10 +64,10 @@ html_fragment
 
 .. autofunction:: screenshot_collect
 
-lcd_display
+LCD display
 -----------
 
-.. module:: urwid.lcd_display
+.. module:: urwid.display.lcd
 
 .. autoclass:: LCDScreen
 

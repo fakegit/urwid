@@ -1,0 +1,238 @@
+name: Python package
+
+on:
+  push:
+    branches-ignore:
+      - 'dependabot/**'
+      - 'gh-pages'
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"  # Canonical versioned tags
+      - "[0-9]+.[0-9]+.[0-9]+.post[0-9]+"  # Canonical rebuild tags
+  pull_request:
+    paths:
+      - "urwid/**"
+      - "pyproject.toml"
+      - "MANIFEST.in"
+      - "README.rst"
+      - "COPYING"
+      - "classifiers.txt"
+      - "requirements.txt"
+      - "tests/**"
+      - "examples/**"
+      - "pytest_requirements.txt"
+      - ".github/workflows/pythonpackage.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  Ruff-format:
+    name: Validate formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check code style with ruff
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          args: "format --check"
+
+  Ruff:
+    name: Check with Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint with ruff
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          args: "check --output-format github"
+
+  PyLint:
+    name: Check with pylint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Create virtual environment
+        run: uv venv --python 3.14
+      - name: Install package with all extras
+        run: uv pip install -e ".[curses,serial,tornado,trio,twisted,zmq]"
+      - name: Install dependencies
+        run: uv pip install --upgrade -r pylint-requirements.txt
+      # tests are not checked, see [tool.ruff] extend-exclude in pyproject.toml
+      - name: Lint with pylint
+        run: uv run --no-project pylint --output-format=github urwid
+
+  Mypy:
+    name: Check with mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Create virtual environment
+        run: uv venv --python 3.14
+      - name: Install package with all extras
+        run: uv pip install -e ".[curses,serial,tornado,trio,twisted,zmq]"
+      - name: Install dependencies
+        run: uv pip install --upgrade -r mypy-requirements.txt
+      # tests other than tests/type_checks are not checked, see [tool.ruff] extend-exclude in pyproject.toml
+      - name: Type check with mypy
+        run: uv run --no-project mypy urwid examples tests/type_checks
+
+  Pyrefly:
+    name: Check with Pyrefly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Create virtual environment
+        run: uv venv --python 3.14
+      - name: Install package with all extras
+        run: uv pip install -e ".[curses,serial,tornado,trio,twisted,zmq]"
+      - name: Install dependencies
+        run: uv pip install --upgrade -r pyrefly-requirements.txt
+      - name: Type check with Pyrefly
+        run: uv run --no-project pyrefly check --output-format full-text-with-github
+
+  Test:
+    needs: [ Ruff-format, Ruff, PyLint, Mypy, Pyrefly ]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      max-parallel: 6
+      matrix:
+        os: [ "ubuntu-latest", "windows-latest" ]
+        # A "t" suffix selects the free-threaded (PEP 703, --disable-gil) build.
+        python-version: [ "3.11", "3.12", "3.13", "3.14", "3.15", "3.13t", "3.14t", "3.15t", "pypy3.11" ]
+        # The macOS jobs are disabled because no macOS runners are available at the moment; re-enable them once
+        # runners are back. urwid has no macOS-specific code: macOS runs the POSIX paths Linux covers, so the oldest
+        # and newest CPython, plus the newest free-threaded build, are enough to catch selector (kqueue) and other
+        # POSIX differences.
+        # include:
+        #   - os: "macos-latest"
+        #     python-version: "3.11"
+        #   - os: "macos-latest"
+        #     python-version: "3.15"
+        #   - os: "macos-latest"
+        #     python-version: "3.15t"
+        exclude:
+          # trio needs cffi on Windows, which publishes no 3.13t wheel and refuses to build for it.
+          - os: "windows-latest"
+            python-version: "3.13t"
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # need for setuptools_scm
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Create virtual environment
+        run: uv venv --python-preference only-system --python ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv pip install -r pytest_requirements.txt
+      - name: Install package with all extras
+        # pyzmq (zmq) and windows-curses (curses) publish no free-threaded wheels for every supported version.
+        # windows-curses publishes no 3.15 wheel and no sdist; the curses extra is empty outside Windows.
+        # The PyPy extras match the pypy3 tox environment.
+        run: >-
+          uv pip install -e ".[${{ startsWith(matrix.python-version, 'pypy')
+          && 'serial,tornado,trio'
+          || endsWith(matrix.python-version, 't')
+          && 'serial,tornado,trio,twisted'
+          || matrix.python-version == '3.15'
+          && 'serial,tornado,trio,twisted,zmq'
+          || 'curses,serial,tornado,trio,twisted,zmq' }}]"
+      - name: Test
+        run: uv run --no-project python -m pytest --cov-report=term --cov-report=xml
+      - name: Coveralls Parallel
+        uses: coverallsapp/github-action@v2
+        with:
+          flag-name: run-${{ matrix.python-version }}-${{ matrix.os }}
+          parallel: true
+          file: coverage.xml
+
+  UploadCoverage:
+    name: Upload coverage to Coveralls
+    needs: [ Test ]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Coveralls Finished
+        uses: coverallsapp/github-action@v2
+        with:
+          parallel-finished: true
+
+  build:
+    name: Build distribution
+    needs: [ Test, Ruff-format, Ruff, PyLint ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # need for setuptools_scm
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Build dist
+        run: uv build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.tar.gz
+          name: built-sdist
+          retention-days: 3
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.whl
+          name: built-bdist
+          retention-days: 3
+
+  Metadata:
+    name: Validate metadata
+    runs-on: ubuntu-latest
+    needs: [ build ]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - uses: actions/download-artifact@v8
+        with:
+          # unpacks default artifact into dist/
+          # if `name: wheels` is omitted, the action will create extra parent dir
+          pattern: built-*
+          merge-multiple: true
+          path: dist
+
+      - name: Validate metadata
+        run: uvx twine check dist/*
+
+  upload_pypi:
+    needs: [ build, Metadata ]
+    # upload to PyPI on every tag
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.repository == 'urwid/urwid'
+    # alternatively, to publish when a GitHub Release is created, use the following rule:
+    # if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/urwid
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: built-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

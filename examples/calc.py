@@ -1,7 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
-# Urwid advanced example column calculator application
-#    Copyright (C) 2004-2009  Ian Ward
+# Urwid example: a calculator with a normal and a programmer mode
+#    Copyright (C) 2026 Urwid developers
 #
 #    This library is free software; you can redistribute it and/or
 #    modify it under the terms of the GNU Lesser General Public
@@ -17,809 +17,872 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
+#
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "urwid>=5.1",
+# ]
+# ///
+"""Example: a calculator with a Normal and a Programmer tab, showing its numbers in big digits.
 
+The module has two parts, so that the user interface can be read on its own:
+
+- The calculator logic: :class:`Calculator` and its two subclasses, plain Python with no urwid in them.
+- The user interface: urwid widgets that show a calculator and send it the keys and the button presses.
+
+The program reads only the keyboard and the mouse, and writes only to the terminal.
+It exits on :kbd:`F8` or the :guilabel:`Exit` button, with status 0.
 """
-Urwid advanced example column calculator application
 
-Features:
-- multiple separate list boxes within columns
-- custom edit widget for editing calculator cells
-- custom parent widget for links to other columns
-- custom list walker to show and hide cell results as required
-- custom wrap and align modes for editing right-1 aligned numbers
-- outputs commands that may be used to recreate expression on exit
-"""
+from __future__ import annotations
 
-from __future__ import print_function
+import abc
+import dataclasses
+import decimal
+import operator
+import string
+import sys
+import typing
 
 import urwid
-import urwid.raw_display
-import urwid.web_display
+from urwid.command_map import Command
 
-# use appropriate Screen class
-if urwid.web_display.is_web_request():
-    Screen = urwid.web_display.Screen
-else:
-    Screen = urwid.raw_display.Screen
+if typing.TYPE_CHECKING:
+    from collections.abc import Callable, Hashable, Sequence
+
+    from urwid.widget.popup import PopUpParametersModel
+
+# Calculator logic: plain Python, no urwid.
+
+#: the most significant digits a decimal number has, typed or calculated
+MAX_DIGITS: typing.Final = 16
+#: the programmer calculator's numbers are limited to this many bits, plus a sign
+WORD_BITS: typing.Final = 32
+#: the format specification that shows an integer in each base the programmer calculator offers
+BASE_FORMATS: typing.Final[dict[int, str]] = {2: "b", 8: "o", 10: "d", 16: "X"}
+
+_N = typing.TypeVar("_N", decimal.Decimal, int)
 
 
-def div_or_none(a,b):
-    """Divide a by b.  Return result or None on divide by zero."""
-    if b == 0:
-        return None
-    return a/b
+class Calculator(abc.ABC, typing.Generic[_N]):
+    """Pocket calculator state: the number being typed, the result so far, and the operator waiting for its operand.
 
-# operators supported and the functions used to calculate a result
-OPERATORS = {
-    '+': (lambda a, b: a+b),
-    '-': (lambda a, b: a-b),
-    '*': (lambda a, b: a*b),
-    '/': div_or_none,
+    Operators are applied in the order they are entered, as on a pocket calculator: ``2 + 3 * 4 =`` gives 20.
+    A failed operation, such as a division by zero, shows an error.
+    The error stays until the next digit, decimal point, backspace or :meth:`clear`.
+    Subclasses decide what a number is: which digits it has, how it is read and shown, and how operators combine two.
+    """
+
+    def __init__(self) -> None:
+        """Start cleared, showing 0."""
+        self._entry = ""  # the number being typed, with a leading "-" when negated
+        self._value: _N | None = None  # the result so far; never None while _operator is set
+        self._operator: str | None = None  # applied to _value and the next operand
+        self._error: str | None = None  # why the last operation failed
+
+    @property
+    @abc.abstractmethod
+    def digits(self) -> str:
+        """The digits a number is typed with, uppercase."""
+
+    @abc.abstractmethod
+    def accepts(self, entry: str) -> bool:
+        """Return whether *entry* is a number short enough to be typed."""
+
+    @abc.abstractmethod
+    def parse(self, text: str) -> _N:
+        """Return the number *text* shows."""
+
+    @abc.abstractmethod
+    def to_text(self, value: _N) -> str:
+        """Return *value* as the display shows it."""
+
+    @abc.abstractmethod
+    def convert(self, number: decimal.Decimal | int) -> _N:
+        """Return *number*, which another calculator showed, as a number of this calculator.
+
+        :raises ArithmeticError: *number* does not fit; the message says why.
+        """
+
+    @abc.abstractmethod
+    def calculate(self, left: _N, operator_key: str, right: _N) -> _N:
+        """Return *left* combined with *right* by the operator named by *operator_key*.
+
+        :raises ArithmeticError: the result is not defined or does not fit; the message says why.
+        """
+
+    @property
+    def error(self) -> str | None:
+        """Why the last operation failed, or ``None`` after a successful one."""
+        return self._error
+
+    @property
+    def number(self) -> _N | None:
+        """The number shown, or ``None`` while an error is shown."""
+        if self._error is not None:
+            return None
+        if self._entry:
+            return self.parse(self._entry)
+        return self._value if self._value is not None else self.parse("0")
+
+    @property
+    def display(self) -> str:
+        """The number to show: the one being typed, else the result so far, else 0."""
+        if self._entry:
+            return self._entry
+        if self._value is not None:
+            return self.to_text(self._value)
+        return "0"
+
+    @property
+    def expression(self) -> str:
+        """The result so far and the operator waiting for its operand, such as ``12 +``, or the error."""
+        if self._error is not None:
+            return self._error
+        if self._operator is None or self._value is None:
+            return ""
+        return f"{self.to_text(self._value)} {self._operator}"
+
+    def clear(self) -> None:
+        """Forget everything, including an error."""
+        self._entry = ""
+        self._value = None
+        self._operator = None
+        self._error = None
+
+    def load(self, number: decimal.Decimal | int | None) -> None:
+        """Forget everything and show *number* as the result, converted by :meth:`convert`.
+
+        ``None``, which :attr:`number` gives while an error is shown, leaves the calculator cleared.
+        """
+        self.clear()
+        if number is None:
+            return
+        try:
+            self._value = self.convert(number)
+        except ArithmeticError as exc:
+            self._error = str(exc)
+
+    def enter_digit(self, digit: str) -> None:
+        """Append *digit* to the number being typed.
+
+        A digit that makes the number too long is ignored.
+
+        :raises ValueError: *digit* is not one of :attr:`digits`.
+        """
+        if digit not in self.digits:
+            raise ValueError(f"{digit!r} is not a digit of this calculator: {self.digits}")
+        if self._error is not None:
+            self.clear()
+        sign = "-" if self._entry.startswith("-") else ""
+        typed = self._entry.removeprefix("-")
+        self._type(sign + ("" if typed == "0" else typed) + digit)
+
+    def _type(self, entry: str) -> None:
+        """Make *entry* the number being typed, unless it is too long."""
+        if self.accepts(entry):
+            self._entry = entry
+
+    def backspace(self) -> None:
+        """Remove the last typed character, or the error."""
+        if self._error is not None:
+            self.clear()
+        self._entry = self._entry[:-1].removesuffix("-")
+
+    def negate(self) -> None:
+        """Change the sign of the number being typed, or of the result when nothing is typed and no operator waits."""
+        if self._error is not None:
+            return
+        if self._entry:
+            self._entry = self._entry.removeprefix("-") if self._entry.startswith("-") else f"-{self._entry}"
+        elif self._value is not None and self._operator is None:
+            self._value = -self._value
+
+    def enter_operator(self, operator_key: str) -> None:
+        """Apply the waiting operator to the typed number, then wait for an operand of *operator_key*.
+
+        Operators entered one after another replace each other, so the last one is used.
+        """
+        if self._error is not None:
+            return
+        if self._entry:
+            self._apply(self.parse(self._entry))
+        elif self._value is None:
+            self._value = self.parse("0")
+        if self._error is None:
+            self._operator = operator_key
+
+    def equals(self) -> None:
+        """Apply the waiting operator.
+
+        With nothing typed, the result so far is the operand, so ``3 * =`` gives 9.
+        """
+        if self._error is not None:
+            return
+        if self._entry:
+            self._apply(self.parse(self._entry))
+        elif self._operator is not None and self._value is not None:
+            self._apply(self._value)
+        self._operator = None
+
+    def _apply(self, operand: _N) -> None:
+        """Combine the result so far with *operand* by the waiting operator, or start with *operand*."""
+        self._entry = ""
+        if self._operator is None or self._value is None:
+            self._value = operand
+            return
+        try:
+            self._value = self.calculate(self._value, self._operator, operand)
+        except ArithmeticError as exc:
+            self._value = None
+            self._operator = None
+            self._error = str(exc)
+
+
+class DecimalCalculator(Calculator[decimal.Decimal]):
+    """Calculator on decimal fractions, rounded to :data:`MAX_DIGITS` significant digits.
+
+    Decimal arithmetic keeps decimal fractions exact: ``0.1 + 0.2 =`` gives 0.3, where binary floats give
+    0.30000000000000004.
+
+    >>> calculator = DecimalCalculator()
+    >>> calculator.enter_point()
+    >>> calculator.enter_digit("1")
+    >>> calculator.enter_operator("+")
+    >>> calculator.enter_point()
+    >>> calculator.enter_digit("2")
+    >>> calculator.equals()
+    >>> calculator.display
+    '0.3'
+    """
+
+    _context: typing.ClassVar[decimal.Context] = decimal.Context(prec=MAX_DIGITS)
+    # E notation keeps 13 significant digits, so a sign, the point and an exponent of up to 7 digits fit one display row
+    _scientific_context: typing.ClassVar[decimal.Context] = decimal.Context(prec=MAX_DIGITS - 3)
+    _operations: typing.ClassVar[
+        dict[str, Callable[[decimal.Context, decimal.Decimal, decimal.Decimal], decimal.Decimal]]
+    ] = {
+        "+": decimal.Context.add,
+        "-": decimal.Context.subtract,
+        "*": decimal.Context.multiply,
+        "/": decimal.Context.divide,
     }
 
-# the uppercase versions of keys used to switch columns
-COLUMN_KEYS = list( "?ABCDEF" )
+    @property
+    def digits(self) -> str:
+        """The decimal digits."""
+        return string.digits
 
-# these lists are used to determine when to display errors
-EDIT_KEYS = list(OPERATORS.keys()) + COLUMN_KEYS + ['backspace','delete']
-MOVEMENT_KEYS = ['up','down','left','right','page up','page down']
+    def accepts(self, entry: str) -> bool:
+        """Return whether *entry* has at most :data:`MAX_DIGITS` digits."""
+        return sum(character.isdigit() for character in entry) <= MAX_DIGITS
 
-# Event text
-E_no_such_column = "Column %s does not exist."
-E_no_more_columns = "Maxumum number of columns reached."
-E_new_col_cell_not_empty = "Column must be started from an empty cell."
-E_invalid_key = "Invalid key '%s'."
-E_no_parent_column = "There is no parent column to return to."
-E_cant_combine = "Cannot combine cells with sub-expressions."
-E_invalid_in_parent_cell = "Cannot enter numbers into parent cell."
-E_invalid_in_help_col = [
-    "Help Column is in focus.  Press ",
-    ('key',COLUMN_KEYS[1]),"-",('key',COLUMN_KEYS[-1]),
-    " to select another column."]
+    def enter_point(self) -> None:
+        """Start the fraction of the number being typed, once."""
+        if self._error is not None:
+            self.clear()
+        if "." not in self._entry:
+            self._type(f"{self._entry or '0'}.")
 
-# Shared layout object
-CALC_LAYOUT = None
+    def parse(self, text: str) -> decimal.Decimal:
+        """Return the number *text* shows, which may end in a point, such as ``5.``."""
+        return decimal.Decimal(text)
 
+    def to_text(self, value: decimal.Decimal) -> str:
+        """Return *value* as text, in E notation when it has more than :data:`MAX_DIGITS` digits."""
+        value = value.normalize(self._context) if value else decimal.Decimal(0)  # no "-0" or "0E+2"
+        text = f"{value:f}"
+        if len(text.removeprefix("-").removeprefix("0.").replace(".", "")) <= MAX_DIGITS:
+            return text
+        return f"{value.normalize(self._scientific_context):E}"
 
-class CalcEvent(Exception):
-    """Events triggered by user input."""
+    def convert(self, number: decimal.Decimal | int) -> decimal.Decimal:
+        """Return *number* as a decimal number."""
+        return decimal.Decimal(number)
 
-    attr = 'event'
+    def calculate(self, left: decimal.Decimal, operator_key: str, right: decimal.Decimal) -> decimal.Decimal:
+        """Return *left* combined with *right*, rounded to :data:`MAX_DIGITS` significant digits.
 
-    def __init__(self, message):
-        self.message = message
-
-    def widget(self):
-        """Return a widget containing event information"""
-        text = urwid.Text( self.message, 'center' )
-        return urwid.AttrWrap( text, self.attr )
-
-class ColumnDeleteEvent(CalcEvent):
-    """Sent when user wants to delete a column"""
-
-    attr = 'confirm'
-
-    def __init__(self, letter, from_parent=0):
-        self.message = ["Press ", ('key',"BACKSPACE"),
-            " again to confirm column removal."]
-        self.letter = letter
-
-class UpdateParentEvent(Exception):
-    """Sent when parent columns may need to be updated."""
-    pass
-
-
-class Cell:
-    def __init__(self, op ):
-        self.op = op
-        self.is_top = op is None
-        self.child = None
-        self.setup_edit()
-        self.result = urwid.Text("", layout=CALC_LAYOUT)
-
-    def show_result(self, next_cell):
-        """Return whether this widget should display its result.
-
-        next_cell -- the cell following self or None"""
-
-        if self.is_top:
-            return False
-        if next_cell is None:
-            return True
-        if self.op == "+" and next_cell.op == "+":
-            return False
-        return True
-
-
-    def setup_edit(self):
-        """Create the standard edit widget for this cell."""
-
-        self.edit = urwid.IntEdit()
-        if not self.is_top:
-            self.edit.set_caption( self.op + " " )
-        self.edit.set_layout( None, None, CALC_LAYOUT )
-
-    def get_value(self):
-        """Return the numeric value of the cell."""
-
-        if self.child is not None:
-            return self.child.get_result()
-        else:
-            return int("0"+self.edit.edit_text)
-
-    def get_result(self):
-        """Return the numeric result of this cell's operation."""
-
-        if self.is_top:
-            return self.get_value()
-        if self.result.text == "":
-            return None
-        return int(self.result.text)
-
-    def set_result(self, result):
-        """Set the numeric result for this cell."""
-
-        if result == None:
-            self.result.set_text("")
-        else:
-            self.result.set_text( "%d" %result )
-
-    def become_parent(self, column, letter):
-        """Change the edit widget to a parent cell widget."""
-
-        self.child = column
-        self.edit = ParentEdit( self.op, letter )
-
-    def remove_child(self):
-        """Change the edit widget back to a standard edit widget."""
-
-        self.child = None
-        self.setup_edit()
-
-    def is_empty( self ):
-        """Return True if the cell is "empty"."""
-
-        return self.child is None and self.edit.edit_text == ""
-
-
-class ParentEdit(urwid.Edit):
-    """Edit widget modified to link to a child column"""
-
-    def __init__(self, op, letter):
-        """Use the operator and letter of the child column as caption
-
-        op -- operator or None
-        letter -- letter of child column
-        remove_fn -- function to call when user wants to remove child
-                     function takes no parameters
+        :raises ZeroDivisionError: *operator_key* is ``/`` and *right* is zero.
+        :raises OverflowError: the result is larger than the decimal context allows.
         """
-
-        urwid.Edit.__init__(self, layout=CALC_LAYOUT)
-        self.op = op
-        self.set_letter( letter )
-
-    def set_letter(self, letter):
-        """Set the letter of the child column for display."""
-
-        self.letter = letter
-        caption = "("+letter+")"
-        if self.op is not None:
-            caption = self.op+" "+caption
-        self.set_caption(caption)
-
-    def keypress(self, size, key):
-        """Disable usual editing, allow only removing of child"""
-
-        if key == "backspace":
-            raise ColumnDeleteEvent(self.letter, from_parent=True)
-        elif key in list("0123456789"):
-            raise CalcEvent(E_invalid_in_parent_cell)
-        else:
-            return key
-
-
-class CellWalker(urwid.ListWalker):
-    def __init__(self, content):
-        self.content = urwid.MonitoredList(content)
-        self.content.modified = self._modified
-        self.focus = (0,0)
-        # everyone can share the same divider widget
-        self.div = urwid.Divider("-")
-
-    def get_cell(self, i):
-        if i < 0 or i >= len(self.content):
-            return None
-        else:
-            return self.content[i]
-
-    def _get_at_pos(self, pos):
-        i, sub = pos
-        assert sub in (0,1,2)
-        if i < 0 or i >= len(self.content):
-            return None, None
-        if sub == 0:
-            edit = self.content[i].edit
-            return urwid.AttrWrap(edit, 'edit', 'editfocus'), pos
-        elif sub == 1:
-            return self.div, pos
-        else:
-            return self.content[i].result, pos
-
-    def get_focus(self):
-        return self._get_at_pos(self.focus)
-
-    def set_focus(self, focus):
-        self.focus = focus
-
-    def get_next(self, start_from):
-        i, sub = start_from
-        assert sub in (0,1,2)
-        if sub == 0:
-            show_result = self.content[i].show_result(
-                self.get_cell(i+1))
-            if show_result:
-                return self._get_at_pos( (i, 1) )
-            else:
-                return self._get_at_pos( (i+1, 0) )
-        elif sub == 1:
-            return self._get_at_pos( (i, 2) )
-        else:
-            return self._get_at_pos( (i+1, 0) )
-
-    def get_prev(self, start_from):
-        i, sub = start_from
-        assert sub in (0,1,2)
-        if sub == 0:
-            if i == 0: return None, None
-            show_result = self.content[i-1].show_result(
-                self.content[i])
-            if show_result:
-                return self._get_at_pos( (i-1, 2) )
-            else:
-                return self._get_at_pos( (i-1, 0) )
-        elif sub == 1:
-            return self._get_at_pos( (i, 0) )
-        else:
-            return self._get_at_pos( (i, 1) )
-
-
-class CellColumn( urwid.WidgetWrap ):
-    def __init__(self, letter):
-        self.walker = CellWalker([Cell(None)])
-        self.content = self.walker.content
-        self.listbox = urwid.ListBox( self.walker )
-        self.set_letter( letter )
-        urwid.WidgetWrap.__init__(self, self.frame)
-
-    def set_letter(self, letter):
-        """Set the column header with letter."""
-
-        self.letter = letter
-        header = urwid.AttrWrap(
-            urwid.Text( ["Column ",('key',letter)],
-            layout = CALC_LAYOUT), 'colhead' )
-        self.frame = urwid.Frame( self.listbox, header )
-
-    def keypress(self, size, key):
-        key = self.frame.keypress( size, key)
-        if key is None:
-            changed = self.update_results()
-            if changed:
-                raise UpdateParentEvent()
-            return
-
-        f, (i, sub) = self.walker.get_focus()
-        if sub != 0:
-            # f is not an edit widget
-            return key
-        if key in OPERATORS:
-            # move trailing text to new cell below
-            edit = self.walker.get_cell(i).edit
-            cursor_pos = edit.edit_pos
-            tail = edit.edit_text[cursor_pos:]
-            edit.set_edit_text( edit.edit_text[:cursor_pos] )
-
-            new_cell = Cell( key )
-            new_cell.edit.set_edit_text( tail )
-            self.content[i+1:i+1] = [new_cell]
-
-            changed = self.update_results()
-            self.move_focus_next( size )
-            self.content[i+1].edit.set_edit_pos(0)
-            if changed:
-                raise UpdateParentEvent()
-            return
-
-        elif key == 'backspace':
-            # unhandled backspace, we're at beginning of number
-            # append current number to cell above, removing operator
-            above = self.walker.get_cell(i-1)
-            if above is None:
-                # we're the first cell
-                raise ColumnDeleteEvent( self.letter,
-                    from_parent=False )
-
-            edit = self.walker.get_cell(i).edit
-            # check that we can combine
-            if above.child is not None:
-                # cell above is parent
-                if edit.edit_text:
-                    # ..and current not empty, no good
-                    raise CalcEvent(E_cant_combine)
-                above_pos = 0
-            else:
-                # above is normal number cell
-                above_pos = len(above.edit.edit_text)
-                above.edit.set_edit_text( above.edit.edit_text +
-                    edit.edit_text )
-
-            self.move_focus_prev( size )
-            self.content[i-1].edit.set_edit_pos(above_pos)
-            del self.content[i]
-            changed = self.update_results()
-            if changed:
-                raise UpdateParentEvent()
-            return
-
-        elif key == 'delete':
-            # pull text from next cell into current
-            cell = self.walker.get_cell(i)
-            below = self.walker.get_cell(i+1)
-            if cell.child is not None:
-                # this cell is a parent
-                raise CalcEvent(E_cant_combine)
-            if below is None:
-                # nothing below
-                return key
-            if below.child is not None:
-                # cell below is a parent
-                raise CalcEvent(E_cant_combine)
-
-            edit = self.walker.get_cell(i).edit
-            edit.set_edit_text( edit.edit_text +
-                below.edit.edit_text )
-
-            del self.content[i+1]
-            changed = self.update_results()
-            if changed:
-                raise UpdateParentEvent()
-            return
-        return key
-
-
-    def move_focus_next(self, size):
-        f, (i, sub) = self.walker.get_focus()
-        assert i<len(self.content)-1
-
-        ni = i
-        while ni == i:
-            self.frame.keypress(size, 'down')
-            nf, (ni, nsub) = self.walker.get_focus()
-
-    def move_focus_prev(self, size):
-        f, (i, sub) = self.walker.get_focus()
-        assert i>0
-
-        ni = i
-        while ni == i:
-            self.frame.keypress(size, 'up')
-            nf, (ni, nsub) = self.walker.get_focus()
-
-
-    def update_results( self, start_from=None ):
-        """Update column.  Return True if final result changed.
-
-        start_from -- Cell to start updating from or None to start from
-                      the current focus (default None)
-        """
-
-        if start_from is None:
-            f, (i, sub) = self.walker.get_focus()
-        else:
-            i = self.content.index(start_from)
-            if i == None: return False
-
-        focus_cell = self.walker.get_cell(i)
-
-        if focus_cell.is_top:
-            x = focus_cell.get_value()
-            last_op = None
-        else:
-            last_cell = self.walker.get_cell(i-1)
-            x = last_cell.get_result()
-
-            if x is not None and focus_cell.op is not None:
-                x = OPERATORS[focus_cell.op]( x,
-                    focus_cell.get_value() )
-            focus_cell.set_result(x)
-
-        for cell in self.content[i+1:]:
-            if cell.op is None:
-                x = None
-            if x is not None:
-                x = OPERATORS[cell.op]( x, cell.get_value() )
-            if cell.get_result() == x:
-                return False
-            cell.set_result(x)
-
-        return True
-
-
-    def create_child( self, letter ):
-        """Return (parent cell,child column) or None,None on failure."""
-        f, (i, sub) = self.walker.get_focus()
-        if sub != 0:
-            # f is not an edit widget
-            return None, None
-
-        cell = self.walker.get_cell(i)
-        if cell.child is not None:
-            raise CalcEvent(E_new_col_cell_not_empty)
-        if cell.edit.edit_text:
-            raise CalcEvent(E_new_col_cell_not_empty)
-
-        child = CellColumn( letter )
-        cell.become_parent( child, letter )
-
-        return cell, child
-
-    def is_empty( self ):
-        """Return True if this column is empty."""
-
-        return len(self.content)==1 and self.content[0].is_empty()
-
-
-    def get_expression(self):
-        """Return the expression as a printable string."""
-
-        l = []
-        for c in self.content:
-            if c.op is not None: # only applies to first cell
-                l.append(c.op)
-            if c.child is not None:
-                l.append("("+c.child.get_expression()+")")
-            else:
-                l.append("%d"%c.get_value())
-
-        return "".join(l)
-
-    def get_result(self):
-        """Return the result of the last cell in the column."""
-
-        return self.content[-1].get_result()
-
-
-
-
-class HelpColumn(urwid.BoxWidget):
-    help_text = [
-        ('title', "Column Calculator"),
-        "",
-        [ "Numbers: ", ('key', "0"), "-", ('key', "9") ],
-        "" ,
-        [ "Operators: ",('key', "+"), ", ", ('key', "-"), ", ",
-            ('key', "*"), " and ", ('key', "/")],
-        "",
-        [ "Editing: ", ('key', "BACKSPACE"), " and ",('key', "DELETE")],
-        "",
-        [ "Movement: ", ('key', "UP"), ", ", ('key', "DOWN"), ", ",
-            ('key', "LEFT"), ", ", ('key', "RIGHT"), ", ",
-            ('key', "PAGE UP"), " and ", ('key', "PAGE DOWN") ],
-        "",
-        [ "Sub-expressions: ", ('key', "("), " and ", ('key', ")") ],
-        "",
-        [ "Columns: ", ('key', COLUMN_KEYS[0]), " and ",
-            ('key',COLUMN_KEYS[1]), "-",
-            ('key',COLUMN_KEYS[-1]) ],
-        "",
-        [ "Exit: ", ('key', "Q") ],
-        "",
-        "",
-        ["Column Calculator does operations in the order they are ",
-            "typed, not by following usual precedence rules.  ",
-            "If you want to calculate ", ('key', "12 - 2 * 3"),
-            " with the multiplication happening before the ",
-            "subtraction you must type ",
-            ('key', "12 - (2 * 3)"), " instead."],
-        ]
-
-    def __init__(self):
-        self.head = urwid.AttrWrap(
-            urwid.Text(["Help Column ", ('key',"?")],
-                layout = CALC_LAYOUT),
-            'help')
-        self.foot = urwid.AttrWrap(
-            urwid.Text(["[text continues.. press ",
-            ('key',"?"), " then scroll]"]), 'helpnote' )
-        self.items = [urwid.Text(x) for x in self.help_text]
-        self.listbox = urwid.ListBox(urwid.SimpleListWalker(self.items))
-        self.body = urwid.AttrWrap( self.listbox, 'help' )
-        self.frame = urwid.Frame( self.body, header=self.head)
-
-    def render(self, size, focus=False):
-        maxcol, maxrow = size
-        head_rows = self.head.rows((maxcol,))
-        if "bottom" in self.listbox.ends_visible(
-            (maxcol, maxrow-head_rows) ):
-            self.frame.footer = None
-        else:
-            self.frame.footer = self.foot
-
-        return self.frame.render( (maxcol, maxrow), focus)
-
-    def keypress( self, size, key ):
-        return self.frame.keypress( size, key )
-
-
-class CalcDisplay:
-    palette = [
-        ('body','white', 'dark blue'),
-        ('edit','yellow', 'dark blue'),
-        ('editfocus','yellow','dark cyan', 'bold'),
-        ('key','dark cyan', 'light gray', ('standout','underline')),
-        ('title', 'white', 'light gray', ('bold','standout')),
-        ('help', 'black', 'light gray', 'standout'),
-        ('helpnote', 'dark green', 'light gray'),
-        ('colhead', 'black', 'light gray', 'standout'),
-        ('event', 'light red', 'black', 'standout'),
-        ('confirm', 'yellow', 'black', 'bold'),
-        ]
-
-    def __init__(self):
-        self.columns = urwid.Columns([HelpColumn(), CellColumn("A")], 1)
-        self.col_list = self.columns.widget_list
-        self.columns.set_focus_column( 1 )
-        view = urwid.AttrWrap(self.columns, 'body')
-        self.view = urwid.Frame(view) # for showing messages
-        self.col_link = {}
-
-    def main(self):
-        self.loop = urwid.MainLoop(self.view, self.palette, screen=Screen(),
-            input_filter=self.input_filter)
-        self.loop.run()
-
-        # on exit write the formula and the result to the console
-        expression, result = self.get_expression_result()
-        print( "Paste this expression into a new Column Calculator session to continue editing:")
-        print( expression)
-        print( "Result:", result)
-
-    def input_filter(self, input, raw_input):
-        if 'q' in input or 'Q' in input:
-            raise urwid.ExitMainLoop()
-
-        # handle other keystrokes
-        for k in input:
-            try:
-                self.wrap_keypress(k)
-                self.event = None
-                self.view.footer = None
-            except CalcEvent as e:
-                # display any message
-                self.event = e
-                self.view.footer = e.widget()
-
-        # remove all input from further processing by MainLoop
-        return []
-
-    def wrap_keypress(self, key):
-        """Handle confirmation and throw event on bad input."""
-
+        if operator_key == "/" and not right:
+            raise ZeroDivisionError("Division by zero")
         try:
-            key = self.keypress(key)
-
-        except ColumnDeleteEvent as e:
-            if e.letter == COLUMN_KEYS[1]:
-                # cannot delete the first column, ignore key
-                return
-
-            if not self.column_empty( e.letter ):
-                # need to get two in a row, so check last event
-                if not isinstance(self.event,ColumnDeleteEvent):
-                    # ask for confirmation
-                    raise e
-            self.delete_column(e.letter)
-
-        except UpdateParentEvent as e:
-            self.update_parent_columns()
-            return
-
-        if key is None:
-            return
-
-        if self.columns.get_focus_column() == 0:
-            if key not in ('up','down','page up','page down'):
-                raise CalcEvent(E_invalid_in_help_col)
-
-        if key not in EDIT_KEYS and key not in MOVEMENT_KEYS:
-            raise CalcEvent(E_invalid_key % key.upper())
-
-    def keypress(self, key):
-        """Handle a keystroke."""
-
-        self.loop.process_input([key])
-        
-        if isinstance(key, tuple):
-            # ignore mouse events
-            return
-
-        if key.upper() in COLUMN_KEYS:
-            # column switch
-            i = COLUMN_KEYS.index(key.upper())
-            if i >= len( self.col_list ):
-                raise CalcEvent(E_no_such_column % key.upper())
-            self.columns.set_focus_column( i )
-            return
-        elif key == "(":
-            # open a new column
-            if len( self.col_list ) >= len(COLUMN_KEYS):
-                raise CalcEvent(E_no_more_columns)
-            i = self.columns.get_focus_column()
-            if i == 0:
-                # makes no sense in help column
-                return key
-            col = self.col_list[i]
-            new_letter = COLUMN_KEYS[len(self.col_list)]
-            parent, child = col.create_child( new_letter )
-            if child is None:
-                # something invalid in focus
-                return key
-            self.col_list.append(child)
-            self.set_link( parent, col, child )
-            self.columns.set_focus_column(len(self.col_list)-1)
-
-        elif key == ")":
-            i = self.columns.get_focus_column()
-            if i == 0:
-                # makes no sense in help column
-                return key
-            col = self.col_list[i]
-            parent, pcol = self.get_parent( col )
-            if parent is None:
-                # column has no parent
-                raise CalcEvent(E_no_parent_column)
-
-            new_i = self.col_list.index( pcol )
-            self.columns.set_focus_column( new_i )
-        else:
-            return key
-
-    def set_link( self, parent, pcol, child ):
-        """Store the link between a parent cell and child column.
-
-        parent -- parent Cell object
-        pcol -- CellColumn where parent resides
-        child -- child CellColumn object"""
-
-        self.col_link[ child ] = parent, pcol
-
-    def get_parent( self, child ):
-        """Return the parent and parent column for a given column."""
-
-        return self.col_link.get( child, (None,None) )
-
-    def column_empty(self, letter):
-        """Return True if the column passed is empty."""
-
-        i = COLUMN_KEYS.index(letter)
-        col = self.col_list[i]
-        return col.is_empty()
+            return self._operations[operator_key](self._context, left, right)
+        except decimal.Overflow as exc:
+            raise OverflowError("The result is too large") from exc
 
 
-    def delete_column(self, letter):
-        """Delete the column with the given letter."""
+class IntegerCalculator(Calculator[int]):
+    """Calculator on integers of :data:`WORD_BITS` bits and a sign, shown in base 2, 8, 10 or 16.
 
-        i = COLUMN_KEYS.index(letter)
-        col = self.col_list[i]
+    Division drops the remainder, rounding towards zero.
 
-        parent, pcol = self.get_parent( col )
-
-        f = self.columns.get_focus_column()
-        if f == i:
-            # move focus to the parent column
-            f = self.col_list.index(pcol)
-            self.columns.set_focus_column(f)
-
-        parent.remove_child()
-        pcol.update_results(parent)
-        del self.col_list[i]
-
-        # delete children of this column
-        keep_right_cols = []
-        remove_cols = [col]
-        for rcol in self.col_list[i:]:
-            parent, pcol = self.get_parent( rcol )
-            if pcol in remove_cols:
-                remove_cols.append( rcol )
-            else:
-                keep_right_cols.append( rcol )
-        for rc in remove_cols:
-            # remove the links
-            del self.col_link[rc]
-        # keep only the non-children
-        self.col_list[i:] = keep_right_cols
-
-        # fix the letter assignments
-        for j in range(i, len(self.col_list)):
-            col = self.col_list[j]
-            # fix the column heading
-            col.set_letter( COLUMN_KEYS[j] )
-            parent, pcol = self.get_parent( col )
-            # fix the parent cell
-            parent.edit.set_letter( COLUMN_KEYS[j] )
-
-    def update_parent_columns(self):
-        "Update the parent columns of the current focus column."
-
-        f = self.columns.get_focus_column()
-        col = self.col_list[f]
-        while 1:
-            parent, pcol = self.get_parent(col)
-            if pcol is None:
-                return
-
-            changed = pcol.update_results( start_from = parent )
-            if not changed:
-                return
-            col = pcol
-
-
-    def get_expression_result(self):
-        """Return (expression, result) as strings."""
-
-        col = self.col_list[1]
-        return col.get_expression(), "%d"%col.get_result()
-
-
-
-class CalcNumLayout(urwid.TextLayout):
+    >>> calculator = IntegerCalculator()
+    >>> calculator.base = 16
+    >>> for digit in "FF":
+    ...     calculator.enter_digit(digit)
+    >>> calculator.base = 2
+    >>> calculator.display
+    '11111111'
     """
-    TextLayout class for bottom-right aligned numbers with a space on
-    the last line for the cursor.
-    """
-    def layout( self, text, width, align, wrap ):
+
+    _operations: typing.ClassVar[dict[str, Callable[[int, int], int]]] = {
+        "+": operator.add,
+        "-": operator.sub,
+        "*": operator.mul,
+    }
+
+    def __init__(self) -> None:
+        """Start cleared, in base 10."""
+        super().__init__()
+        self._base = 10
+
+    @property
+    def base(self) -> int:
+        """The base numbers are typed and shown in, one of :data:`BASE_FORMATS`.
+
+        Changing it converts the number being typed.
         """
-        Return layout structure for calculator number display.
+        return self._base
+
+    @base.setter
+    def base(self, base: int) -> None:
+        if base not in BASE_FORMATS:
+            raise ValueError(f"base {base} is not one of {tuple(BASE_FORMATS)}")
+        value = self.parse(self._entry) if self._entry else None
+        self._base = base
+        if value is not None:
+            self._entry = self.to_text(value)
+
+    @property
+    def digits(self) -> str:
+        """The digits of :attr:`base`: 0-1, 0-7, 0-9 or 0-F."""
+        return (string.digits + string.ascii_uppercase)[: self._base]
+
+    def accepts(self, entry: str) -> bool:
+        """Return whether *entry* fits in :data:`WORD_BITS` bits."""
+        return self.parse(entry).bit_length() <= WORD_BITS
+
+    def parse(self, text: str) -> int:
+        """Return the number *text* shows in :attr:`base`."""
+        return int(text, self._base)
+
+    def to_text(self, value: int) -> str:
+        """Return *value* in :attr:`base`, with a leading ``-`` when negative."""
+        return format(value, BASE_FORMATS[self._base])
+
+    def convert(self, number: decimal.Decimal | int) -> int:
+        """Return *number* without its fraction, rounding towards zero.
+
+        :raises OverflowError: *number* does not fit in :data:`WORD_BITS` bits.
         """
-        lt = len(text) + 1 # extra space for cursor
-        r = (lt) % width # remaining segment not full width wide
-        linestarts = range( r, lt, width )
-        l = []
-        if linestarts:
-            if r:
-                # right-align the remaining segment on 1st line
-                l.append( [(width-r,None),(r, 0, r)] )
-            # fill all but the last line
-            for x in linestarts[:-1]:
-                l.append( [(width, x, x+width)] )
-            s = linestarts[-1]
-            # add the last line with a cursor hint
-            l.append( [(width-1, s, lt-1), (0, lt-1)] )
-        elif lt-1:
-            # all fits on one line, so right align the text
-            # with a cursor hint at the end
-            l.append( [(width-lt,None),(lt-1,0,lt-1), (0,lt-1)] )
+        # compared before int(), which would build every digit of a decimal with a large exponent
+        if abs(number) >= 2**WORD_BITS:
+            raise OverflowError(f"The number does not fit in {WORD_BITS} bits")
+        return int(number)
+
+    def calculate(self, left: int, operator_key: str, right: int) -> int:
+        """Return *left* combined with *right*.
+
+        :raises ZeroDivisionError: *operator_key* is ``/`` and *right* is zero.
+        :raises OverflowError: the result does not fit in :data:`WORD_BITS` bits.
+        """
+        if operator_key == "/":
+            if not right:
+                raise ZeroDivisionError("Division by zero")
+            quotient = abs(left) // abs(right)
+            result = -quotient if (left < 0) != (right < 0) else quotient
         else:
-            # nothing on the line, right align a cursor hint
-            l.append( [(width-1,None),(0,0)] )
-
-        return l
-
-
+            result = self._operations[operator_key](left, right)
+        if result.bit_length() > WORD_BITS:
+            raise OverflowError(f"The result does not fit in {WORD_BITS} bits")
+        return result
 
 
-def main():
-    """Launch Column Calculator."""
-    global CALC_LAYOUT
-    CALC_LAYOUT = CalcNumLayout()
+# User interface: urwid widgets around the calculators.
 
-    urwid.web_display.set_preferences("Column Calculator")
-    # try to handle short web requests quickly
-    if urwid.web_display.handle_short_request():
-        return
+FONT: typing.Final = urwid.Thin3x3Font()
+#: big digits in one row of the display: 24 digits of 3 columns fit an 80-column terminal
+DIGITS_PER_ROW: typing.Final = 24
+#: rows of big digits in the display: two hold the 32 digits of a number in base 2
+DISPLAY_ROWS: typing.Final = 2
+#: columns of a button pad: 4 buttons of 9 columns and the gaps between them
+PAD_WIDTH: typing.Final = 39
+#: keys of the operators, the same on the main keyboard and on the numeric keypad
+OPERATOR_KEYS: typing.Final = frozenset("+-*/")
 
-    CalcDisplay().main()
 
-if '__main__'==__name__ or urwid.web_display.is_web_request():
-    main()
+@dataclasses.dataclass(frozen=True, slots=True, weakref_slot=True)
+class Theme:
+    """The colors of a theme, named after their role in the Monokai color scheme."""
+
+    background: str
+    panel: str  # buttons, bars and dialogs
+    text: str
+    comment: str
+    pink: str
+    orange: str
+    yellow: str
+    green: str
+    blue: str
+    purple: str
+
+
+#: the themes, from the Monokai color scheme and a light variant of it
+THEMES: typing.Final = {
+    "Monokai dark": Theme(
+        background="#272822",
+        panel="#3e3d32",
+        text="#f8f8f2",
+        comment="#75715e",
+        pink="#f92672",
+        orange="#fd971f",
+        yellow="#e6db74",
+        green="#a6e22e",
+        blue="#66d9ef",
+        purple="#ae81ff",
+    ),
+    "Monokai bright": Theme(
+        background="#fafafa",
+        panel="#e6e6dc",
+        text="#272822",
+        comment="#8a8670",
+        pink="#e0115f",
+        orange="#d75f00",
+        yellow="#998f00",
+        green="#5f8700",
+        blue="#0087af",
+        purple="#7a4ec4",
+    ),
+}
+
+#: palette entries: name, foreground and background field of :class:`Theme`, then the 16-color foreground, background
+#: and the monochrome setting, which are the same for every theme
+ENTRIES: typing.Final = (
+    ("body", "text", "background", "light gray", "black", None),
+    ("header", "text", "panel", "white", "dark blue", None),
+    ("footer", "comment", "panel", "light gray", "dark blue", None),
+    ("key", "orange", "panel", "yellow", "dark blue", "bold"),
+    ("expression", "comment", "background", "dark gray", "black", None),
+    ("display", "purple", "background", "light magenta", "black", None),
+    ("error", "pink", "background", "light red", "black", None),
+    ("button", "text", "panel", "black", "light gray", None),
+    ("button focus", "background", "orange", "white", "brown", "standout"),
+    ("operator", "pink", "panel", "dark red", "light gray", None),
+    ("operator focus", "background", "pink", "white", "dark red", "standout"),
+    ("control", "blue", "panel", "dark blue", "light gray", None),
+    ("control focus", "background", "blue", "white", "dark blue", "standout"),
+    ("tab", "comment", "panel", "black", "light gray", None),
+    ("tab selected", "green", "background", "light green", "black", "bold"),
+    ("tab cursor", "background", "green", "black", "light green", "standout"),
+    ("disabled", "comment", "panel", "dark gray", "light gray", None),
+    ("dialog", "text", "panel", "black", "light gray", None),
+)
+
+HELP: typing.Final = """\
+Type on the keyboard or on the numeric keypad, or press the buttons with the mouse or with Space.
+
+  0-9, A-F     digits; A-F in base 16
+  + - * /      operators, applied from left to right
+  Enter, =     result
+  . or ,       decimal point, on the Normal tab
+  Backspace    remove the last digit
+  Esc, Delete  clear
+  F9           change the sign
+  Alt+Left/Right  switch between the tabs
+  F1 help, F2 theme, F8 exit
+
+The Programmer tab calculates with 32-bit integers and a sign."""
+
+
+def palette(theme: str) -> list[tuple[Hashable, str, str, str | None, str, str]]:
+    """Return the palette of *theme*.
+
+    Terminals with 256 colors or more get the colors of the theme, others get the same basic colors for every theme.
+    """
+    colors = THEMES[theme]
+    return [
+        (name, foreground, background, mono, getattr(colors, foreground_role), getattr(colors, background_role))
+        for name, foreground_role, background_role, foreground, background, mono in ENTRIES
+    ]
+
+
+class Display(urwid.WidgetWrap[urwid.LineBox[urwid.AttrMap[urwid.Pile]]]):
+    """The expression line over the calculator's number in big digits, the last digits in the last row."""
+
+    def __init__(self) -> None:
+        """Build an empty display with :data:`DISPLAY_ROWS` rows of big digits."""
+        self._expression = urwid.Text("", align=urwid.RIGHT)
+        self._rows = [urwid.BigText("", FONT) for _ in range(DISPLAY_ROWS)]
+        pile = urwid.Pile(
+            [
+                urwid.AttrMap(self._expression, "expression"),
+                *(urwid.Padding(big_text, urwid.RIGHT, urwid.WHSettings.CLIP) for big_text in self._rows),
+            ]
+        )
+        super().__init__(urwid.LineBox(urwid.AttrMap(pile, "display")))
+
+    def show(self, calculator: Calculator[typing.Any]) -> None:
+        """Show the state of *calculator*."""
+        self._expression.set_text(calculator.expression)
+        if calculator.error is not None:
+            lines: list[str | tuple[Hashable, str]] = [("error", "E")]
+        else:
+            text = calculator.display
+            lines = [text[max(end - DIGITS_PER_ROW, 0) : end] for end in range(len(text), 0, -DIGITS_PER_ROW)]
+            lines.reverse()
+        lines = [*([""] * (len(self._rows) - len(lines))), *lines]
+        for big_text, line in zip(self._rows, lines, strict=True):
+            big_text.set_text(line)
+
+
+class CalculatorPane(urwid.WidgetWrap[urwid.Filler[urwid.Pile]]):
+    """The buttons of one calculator, which show its state on a display shared with the other panes.
+
+    A key is offered to the calculator before the focused widget, so :kbd:`Enter` gives the result
+    wherever the focus is in the pane, and :kbd:`Space` presses the focused button.
+    A button press goes through :meth:`press` as the key it stands for.
+    """
+
+    def __init__(self, calculator: Calculator[typing.Any], display: Display) -> None:
+        """Send the presses to *calculator* and show its state on *display*.
+
+        Subclasses add the buttons with :meth:`add_pad`.
+        """
+        self.calculator = calculator
+        self.display = display
+        self.pile = urwid.Pile([])
+        super().__init__(urwid.Filler(self.pile, valign=urwid.TOP))
+
+    def button(self, label: str, key: str, attr: str = "button") -> urwid.AttrMap[urwid.Widget]:
+        """Return a button labelled *label* that presses *key*, drawn in *attr* and in ``"<attr> focus"``."""
+        button = urwid.Button(label, on_press=self._on_button, user_data=key, align=urwid.CENTER)
+        cell: urwid.AttrMap[urwid.Widget] = urwid.AttrMap(button, attr, f"{attr} focus")
+        return cell
+
+    def add_pad(
+        self,
+        rows: Sequence[Sequence[urwid.Widget | tuple[typing.Literal[urwid.WHSettings.WEIGHT], int, urwid.Widget]]],
+    ) -> None:
+        """Add *rows* of buttons as a grid of :data:`PAD_WIDTH` columns, and focus it.
+
+        A button with a weight of 2 takes the place of two.
+        """
+        pad = urwid.Pile([urwid.Columns(row, dividechars=1) for row in rows])
+        self.pile.contents.append((urwid.Padding(pad, urwid.CENTER, PAD_WIDTH), self.pile.options()))
+        self.pile.focus_position = len(self.pile.contents) - 1
+
+    def press(self, key: str) -> bool:
+        """Send *key* to the calculator and show the result.
+
+        :returns: whether the calculator takes *key*.
+        """
+        calculator = self.calculator
+        if len(key) == 1 and key.upper() in calculator.digits:
+            calculator.enter_digit(key.upper())
+        elif key in OPERATOR_KEYS:
+            calculator.enter_operator(key)
+        elif key in {"enter", "="}:
+            calculator.equals()
+        elif key == "backspace":
+            calculator.backspace()
+        elif key in {"esc", "delete"}:
+            calculator.clear()
+        elif key == "f9":
+            calculator.negate()
+        elif key in {".", ","} and isinstance(calculator, DecimalCalculator):
+            calculator.enter_point()
+        else:
+            return False
+        self.display.show(calculator)
+        return True
+
+    def keypress(self, size: tuple[()] | tuple[int] | tuple[int, int], key: str) -> str | None:
+        """Give *key* to the calculator, and the keys it does not take to the focused widget."""
+        if self.press(key):
+            return None
+        return super().keypress(size, key)
+
+    def _on_button(self, _button: urwid.Button, key: str) -> None:
+        """Press the key of a clicked button."""
+        self.press(key)
+
+
+class NormalPane(CalculatorPane):
+    """A decimal calculator with the buttons laid out as on a numeric keypad."""
+
+    def __init__(self, display: Display) -> None:
+        """Build the calculator and its button pad, showing it on *display*."""
+        super().__init__(DecimalCalculator(), display)
+        self.add_pad(
+            [
+                [
+                    self.button("Clear", "esc", "control"),
+                    self.button("←", "backspace", "control"),
+                    self.button("±", "f9", "control"),
+                    self.button("/", "/", "operator"),
+                ],
+                *(
+                    [*(self.button(digit, digit) for digit in digits), self.button(key, key, "operator")]
+                    for digits, key in (("789", "*"), ("456", "-"), ("123", "+"))
+                ),
+                [(urwid.WEIGHT, 2, self.button("0", "0")), self.button(".", "."), self.button("=", "enter", "control")],
+            ]
+        )
+
+
+class ProgrammerPane(CalculatorPane):
+    """An integer calculator with a radio button per base over a hexadecimal keypad.
+
+    The keypad keeps every digit in its place: the digits the selected base does not have are greyed out,
+    and the focus skips them.
+    """
+
+    def __init__(self, display: Display) -> None:
+        """Build the calculator, the base selection and the keypad, showing it on *display*."""
+        self._integer = IntegerCalculator()
+        super().__init__(self._integer, display)
+        group: list[urwid.RadioButton] = []
+        bases = urwid.GridFlow(
+            [
+                urwid.Text("Base:"),
+                *(
+                    urwid.AttrMap(
+                        urwid.RadioButton(
+                            group,
+                            str(base),
+                            state=base == self._integer.base,
+                            on_state_change=self._on_base,
+                            user_data=base,
+                        ),
+                        None,
+                        "button focus",
+                    )
+                    for base in BASE_FORMATS
+                ),
+            ],
+            cell_width=7,
+            h_sep=1,
+            v_sep=0,
+            align=urwid.CENTER,
+        )
+        self.pile.contents.append((bases, self.pile.options()))
+        self._digit_cells: dict[str, tuple[urwid.AttrMap[urwid.Widget], urwid.Widget]] = {}
+        for digit in "0123456789ABCDEF":
+            cell = self.button(digit, digit)
+            self._digit_cells[digit] = (cell, cell.original_widget)
+        self._show_digit_buttons()
+        cells = {digit: cell for digit, (cell, _button) in self._digit_cells.items()}
+        self.add_pad(
+            [
+                [cells["D"], cells["E"], cells["F"], self.button("Clear", "esc", "control")],
+                [cells["A"], cells["B"], cells["C"], self.button("←", "backspace", "control")],
+                *(
+                    [*(cells[digit] for digit in digits), self.button(key, key, "operator")]
+                    for digits, key in (("789", "/"), ("456", "*"), ("123", "-"))
+                ),
+                [
+                    self.button("±", "f9", "control"),
+                    cells["0"],
+                    self.button("=", "enter", "control"),
+                    self.button("+", "+", "operator"),
+                ],
+            ]
+        )
+
+    def _show_digit_buttons(self) -> None:
+        """Enable the buttons of the digits of the selected base, and grey out the others."""
+        for digit, (cell, button) in self._digit_cells.items():
+            enabled = digit in self._integer.digits
+            cell.original_widget = button if enabled else urwid.WidgetDisable(button)
+            cell.set_attr_map({None: "button" if enabled else "disabled"})
+
+    def _on_base(self, _radio: urwid.RadioButton, state: bool, base: int) -> None:
+        """Switch the calculator to the base of a radio button that was selected."""
+        if state:
+            self._integer.base = base
+            self._show_digit_buttons()
+            self.display.show(self._integer)
+
+
+class ThemeButton(urwid.PopUpLauncher[urwid.Button]):
+    """A button that opens a pop-up with a radio button per theme.
+
+    Selecting a radio button shows its theme at once.
+    :guilabel:`OK` keeps it; :guilabel:`Cancel`, :kbd:`Esc` and a click outside the pop-up show the saved theme again.
+    """
+
+    def __init__(self, screen: urwid.BaseScreen) -> None:
+        """Wrap a :guilabel:`Theme` button that changes the palette of *screen*.
+
+        The first theme is the saved one.
+        """
+        super().__init__(urwid.Button("Theme", on_press=self._on_open), close_on_menu=True, close_on_click_outside=True)
+        self._screen = screen
+        self.theme = next(iter(THEMES))  # the saved theme
+        self._shown = self.theme
+
+    def create_pop_up(self) -> urwid.AttrMap[urwid.LineBox[urwid.Filler[urwid.Pile]]]:
+        """Return the theme radio buttons over :guilabel:`OK` and :guilabel:`Cancel`."""
+        group: list[urwid.RadioButton] = []
+        radios = [
+            urwid.AttrMap(
+                urwid.RadioButton(
+                    group, name, state=name == self.theme, on_state_change=self._on_select, user_data=name
+                ),
+                None,
+                "button focus",
+            )
+            for name in THEMES
+        ]
+        buttons = urwid.Columns(
+            [
+                urwid.AttrMap(urwid.Button(label, on_press=callback, align=urwid.CENTER), None, "button focus")
+                for label, callback in (("OK", self._on_ok), ("Cancel", self._on_cancel))
+            ],
+            dividechars=2,
+        )
+        body = urwid.Pile([*radios, urwid.Divider(), buttons])
+        return urwid.AttrMap(urwid.LineBox(urwid.Filler(body, valign=urwid.TOP), title="Theme"), "dialog")
+
+    def get_pop_up_parameters(self) -> PopUpParametersModel:
+        """Place the pop-up under the button, or over it when there is no room below."""
+        return {"left": 0, "top": 1, "overlay_width": 26, "overlay_height": len(THEMES) + 4, "anchor_height": 1}
+
+    def close_pop_up(self) -> None:
+        """Close the pop-up and show the saved theme.
+
+        :guilabel:`OK` saves the shown theme before it closes the pop-up.
+        """
+        self._show(self.theme)
+        super().close_pop_up()
+
+    def _show(self, theme: str) -> None:
+        """Draw the screen in *theme*."""
+        if theme != self._shown:
+            self._screen.register_palette(palette(theme), replace=True)
+            self._shown = theme
+
+    def _on_open(self, _button: urwid.Button) -> None:
+        """Open the pop-up when the button is pressed."""
+        self.open_pop_up()
+
+    def _on_select(self, _radio: urwid.RadioButton, state: bool, theme: str) -> None:
+        """Show the theme of a radio button that was selected."""
+        if state:
+            self._show(theme)
+
+    def _on_ok(self, _button: urwid.Button) -> None:
+        """Save the shown theme and close the pop-up."""
+        self.theme = self._shown
+        self.close_pop_up()
+
+    def _on_cancel(self, _button: urwid.Button) -> None:
+        """Close the pop-up, which shows the saved theme again."""
+        self.close_pop_up()
+
+
+def main() -> int:
+    """Build the window, run the main loop until F8 or the Exit button, and return the exit status."""
+    screen = urwid.display.raw.Screen()
+    theme_button = ThemeButton(screen)
+    display = Display()
+    panes = (NormalPane(display), ProgrammerPane(display))
+    tabs = urwid.Tabs(
+        [("Normal", panes[0]), ("Programmer", panes[1])],
+        bar_selectable=True,
+        attr_map="tab",
+        selected_map="tab selected",
+        focus_map="tab cursor",
+    )
+    display.show(panes[0].calculator)
+
+    def on_tab_changed(_tabs: urwid.Tabs, old: int | None, new: int | None) -> None:
+        """Move the number shown to the calculator of the selected tab, converted to its kind of number."""
+        if old is None or new is None:
+            raise ValueError("the calculator tabs are never removed")
+        calculator = panes[new].calculator
+        calculator.load(panes[old].calculator.number)
+        display.show(calculator)
+
+    urwid.connect_signal(tabs, "focus changed", on_tab_changed)
+
+    def show_help(_button: urwid.Button | None = None) -> None:
+        if stack.depth == 0 and theme_button.pop_up_widget is None:
+            stack.open(help_dialog)
+
+    def exit_program(_button: urwid.Button | None = None) -> typing.NoReturn:
+        raise urwid.ExitMainLoop
+
+    header = urwid.Columns(
+        [
+            *(
+                (urwid.PACK, urwid.AttrMap(widget, None, "button focus"))
+                for widget in (
+                    urwid.Button("Help", on_press=show_help),
+                    theme_button,
+                    urwid.Button("Exit", on_press=exit_program),
+                )
+            ),
+            urwid.Text("Calculator ", align=urwid.RIGHT),
+        ],
+        dividechars=1,
+    )
+    body = urwid.Pile([(urwid.PACK, urwid.AttrMap(header, "header")), (urwid.PACK, display), tabs])
+    body.focus_position = 2
+    keys = (("F1", "help"), ("F2", "theme"), ("F8", "exit"), ("Esc", "clear"), ("Alt+←/→", "tabs"))
+    footer = urwid.Text([part for key, action in keys for part in (("key", f" {key}"), f" {action} ")])
+    frame: urwid.Frame[urwid.AttrMap[urwid.Pile], None, urwid.AttrMap[urwid.Text]] = urwid.Frame(
+        urwid.AttrMap(body, "body"), footer=urwid.AttrMap(footer, "footer")
+    )
+    stack = urwid.OverlayStack(frame, close_on_menu=True, close_on_click_outside=True)
+
+    def close_help(_button: urwid.Button) -> None:
+        stack.close()
+
+    ok_button = urwid.Button("OK", on_press=close_help, align=urwid.CENTER)
+    help_dialog = urwid.AttrMap(
+        urwid.LineBox(
+            urwid.Pile(
+                [
+                    urwid.Text(HELP),
+                    urwid.Divider(),
+                    urwid.Padding(urwid.AttrMap(ok_button, None, "button focus"), urwid.CENTER, 8),
+                ]
+            ),
+            title="Help",
+        ),
+        "dialog",
+    )
+
+    def unhandled_input(key: str | tuple[str, int, int, int]) -> None:
+        if key == "f8":
+            exit_program()
+        elif key == "f1":
+            show_help()
+        elif stack.depth == 0 and theme_button.pop_up_widget is None:
+            if key == "f2":
+                theme_button.open_pop_up()
+            # the keys the tab bar and the header leave unhandled go to the calculator of the selected tab
+            elif isinstance(key, str) and isinstance(tabs.focus, CalculatorPane):
+                tabs.focus.press(key)
+
+    urwid.command_map.bind(Command.NEXT_TAB, "meta right")
+    urwid.command_map.bind(Command.PREVIOUS_TAB, "meta left")
+    loop = urwid.MainLoop(
+        stack,
+        palette(theme_button.theme),
+        screen=screen,
+        unhandled_input=unhandled_input,
+        pop_ups=True,
+    )
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

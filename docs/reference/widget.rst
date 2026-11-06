@@ -29,6 +29,17 @@ WidgetContainerMixin
 
 .. autoclass:: WidgetContainerMixin
 
+SelectNavigationMixin
+~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: SelectNavigationMixin
+   :private-members: _select_candidates, _select_enter_focus, _select_keypress_unhandled
+
+SelectNavigationListContentsMixin
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: SelectNavigationListContentsMixin
+
 
 Basic Widget Classes
 --------------------
@@ -48,25 +59,13 @@ IntEdit
 
 .. autoclass:: IntEdit
 
-Button
-~~~~~~
-
-.. autoclass:: Button
-
-CheckBox
-~~~~~~~~
-
-.. autoclass:: CheckBox
-
-RadioButton
-~~~~~~~~~~~
-
-.. autoclass:: RadioButton
-
 TreeWidget
 ~~~~~~~~~~
 
 .. autoclass:: TreeWidget
+
+.. autoclass:: urwid.widget.treetools.TreeSymbols
+   :undoc-members:
 
 
 .. currentmodule:: urwid.numedit
@@ -85,12 +84,46 @@ FloatEdit
 .. autoclass:: FloatEdit
 
 
+Control Widget Classes
+----------------------
+
+.. currentmodule:: urwid
+
+Button
+~~~~~~
+
+.. autoclass:: Button
+
+CheckBox
+~~~~~~~~
+
+.. autoclass:: CheckBox
+
+RadioButton
+~~~~~~~~~~~
+
+.. autoclass:: RadioButton
+
+DropDown
+~~~~~~~~
+
+.. autoclass:: DropDown
+
+
+Special cases text widgets
+--------------------------
+
 .. currentmodule:: urwid
 
 SelectableIcon
 ~~~~~~~~~~~~~~
 
 .. autoclass:: SelectableIcon
+
+ANSIText
+~~~~~~~~
+
+.. autoclass:: ANSIText
 
 
 Decoration Widget Classes
@@ -126,6 +159,9 @@ SolidFill
 
 .. autoclass:: SolidFill
 
+Pop-up Widget Classes
+---------------------
+
 PopUpLauncher
 ~~~~~~~~~~~~~
 
@@ -136,15 +172,28 @@ PopUpTarget
 
 .. autoclass:: PopUpTarget
 
-WidgetPlaceholder
-~~~~~~~~~~~~~~~~~
+Special Widget Classes
+----------------------
 
-.. autoclass:: WidgetPlaceholder
+Notifications
+~~~~~~~~~~~~~
+
+.. autoclass:: Notifications
+
+Notification
+~~~~~~~~~~~~
+
+.. autoclass:: Notification
 
 WidgetDisable
 ~~~~~~~~~~~~~
 
 .. autoclass:: WidgetDisable
+
+WidgetPlaceholder
+~~~~~~~~~~~~~~~~~
+
+.. autoclass:: WidgetPlaceholder
 
 Container Widget Classes
 ------------------------
@@ -179,6 +228,33 @@ GridFlow
 
 .. autoclass:: GridFlow
 
+Table
+~~~~~
+
+.. autoclass:: Table
+
+TableRow
+~~~~~~~~
+
+.. autoclass:: TableRow
+
+TableColumn
+~~~~~~~~~~~
+
+.. autoclass:: TableColumn
+
+TableLayout
+~~~~~~~~~~~
+
+.. autoclass:: urwid.widget.TableLayout
+
+Tabs
+~~~~
+
+.. autoclass:: Tabs
+
+.. autoclass:: urwid.widget.tabs.TabsSymbols
+
 BoxAdapter
 ~~~~~~~~~~
 
@@ -188,6 +264,11 @@ Overlay
 ~~~~~~~
 
 .. autoclass:: Overlay
+
+OverlayStack
+~~~~~~~~~~~~
+
+.. autoclass:: OverlayStack
 
 Graphic Widget Classes
 ----------------------
@@ -207,6 +288,13 @@ ProgressBar
 
 .. autoclass:: ProgressBar
 
+Spinner
+~~~~~~~
+
+.. autoclass:: Spinner
+
+.. autoclass:: urwid.widget.spinner.SpinnerFrames
+
 BigText
 ~~~~~~~
 
@@ -219,3 +307,21 @@ Terminal
 
 .. autoclass:: Terminal
 
+
+Scroll Widget Classes
+---------------------
+
+Scrollable
+~~~~~~~~~~
+
+.. autoclass:: Scrollable
+
+ScrollBar
+~~~~~~~~~
+
+.. autoclass:: ScrollBar
+
+.. autoclass:: urwid.widget.scrollable.ScrollbarSymbols
+   :undoc-members:
+
+.. currentmodule:: urwid

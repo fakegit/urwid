@@ -17,41 +17,74 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
+
+"""Example: a terminal emulator widget running a shell inside an Urwid application."""
+
+from __future__ import annotations
+
+import typing
+from contextlib import suppress
 
 import urwid
 
-def main():
-    urwid.set_encoding('utf8')
-    term = urwid.Terminal(None, encoding='utf-8')
+
+def main() -> None:
+    """Run the terminal emulation widget demo."""
+    urwid.set_encoding("utf8")
+    term = urwid.Terminal(None, encoding="utf-8")
+
+    size_widget = urwid.Text("")
 
     mainframe = urwid.LineBox(
-        urwid.Pile([
-            ('weight', 70, term),
-            ('fixed', 1, urwid.Filler(urwid.Edit('focus test edit: '))),
-        ]),
+        urwid.Pile(
+            [
+                (urwid.WEIGHT, 70, term),
+                (1, urwid.Filler(size_widget)),
+                (1, urwid.Filler(urwid.Edit("focus test edit: "))),
+            ]
+        ),
     )
 
-    def set_title(widget, title):
+    def set_title(widget: urwid.Terminal, title: str) -> None:
         mainframe.set_title(title)
+        # the program in the terminal chooses the title, and set_title() removes the control characters from it
+        bpm_screen.set_title(title)
 
-    def quit(*args, **kwargs):
-        raise urwid.ExitMainLoop()
+    def execute_quit(*args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:
+        raise urwid.ExitMainLoop
 
-    def handle_key(key):
-        if key in ('q', 'Q'):
-            quit()
+    def handle_key(key: str | tuple[str, int, int, int]) -> None:
+        if key in {"q", "Q"}:
+            execute_quit()
 
-    urwid.connect_signal(term, 'title', set_title)
-    urwid.connect_signal(term, 'closed', quit)
+    def handle_resize(widget: urwid.Terminal, size: tuple[int, int]) -> None:
+        size_widget.set_text(f"Terminal size: [{size[0]}, {size[1]}]")
+
+    urwid.connect_signal(term, "title", set_title)
+    urwid.connect_signal(term, "closed", execute_quit)
+
+    with suppress(NameError):
+        urwid.connect_signal(term, "resize", handle_resize)
+        # if using a version of Urwid library where vterm doesn't support
+        # resize, don't register the signal handler.
+
+    try:
+        # create Screen with bracketed paste mode support enabled
+        bpm_screen = urwid.display.raw.Screen(bracketed_paste_mode=True)  # pylint: disable=unexpected-keyword-arg
+    except TypeError:
+        # if using a version of Urwid library that doesn't support
+        # bracketed paste mode, do without it.
+        bpm_screen = urwid.display.raw.Screen()
 
     loop = urwid.MainLoop(
         mainframe,
-        handle_mouse=False,
-        unhandled_input=handle_key)
+        screen=bpm_screen,
+        unhandled_input=handle_key,
+    )
 
-    term.main_loop = loop
     loop.run()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

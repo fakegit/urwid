@@ -1,0 +1,42 @@
+name: Documentation
+
+on:
+  push:
+    branches-ignore:
+      - 'dependabot/**'
+      - 'gh-pages'
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"  # Canonical versioned tags
+      - "[0-9]+.[0-9]+.[0-9]+.post[0-9]+"  # Canonical rebuild tags
+  pull_request:
+    branches-ignore:
+      - 'dependabot/**'
+      - 'gh-pages'
+    paths:
+      - "docs/**"
+      - "README.rst"
+      - "urwid/**"
+      - "pyproject.toml"
+      - ".github/workflows/documentation.yml"
+
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # need for setuptools_scm
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Create virtual environment
+        run: uv venv
+      - name: Install python dependencies
+        run: uv pip install -U --group pyproject.toml:documentation
+      - name: Install main package with all extras
+        run: uv pip install -U -e ".[curses,serial,tornado,trio,twisted,zmq]"
+      - name: Build documentation
+        run: uv run --no-project sphinx-build docs build/documentation
+      - uses: actions/upload-artifact@v7
+        with:
+          path: build/documentation
+          name: documentation

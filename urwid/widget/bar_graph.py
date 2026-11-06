@@ -1,0 +1,784 @@
+"""Bar graph widgets and the helpers that compute their display."""
+
+from __future__ import annotations
+
+import bisect
+import math
+import typing
+from collections import deque
+
+from urwid import _deprecation
+from urwid.canvas import CanvasCombine, CompositeCanvas, SolidCanvas
+from urwid.util import get_encoding_mode
+
+from .constants import BAR_SYMBOLS, Sizing
+from .text import Text
+from .widget import Widget, WidgetError, WidgetMeta, nocache_widget_render, nocache_widget_render_instance
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+    from typing import Literal
+
+    from urwid.canvas import Canvas
+    from urwid.util import _TagMarkup
+
+
+class BarGraphMeta(WidgetMeta):
+    """
+    Detect subclass get_data() method and dynamic change to get_data() method and disable caching in these cases.
+
+    .. deprecated:: 4.0.10
+        Both cases are deprecated, see :class:`BarGraph`.
+    """
+
+    def __init__(  # noqa: D107 -- BarGraphMeta is deprecated for backwards compatibility only
+        cls,
+        name: str,
+        bases: tuple[type, ...],
+        d: dict[str, typing.Any],
+    ) -> None:
+        # pylint: disable=protected-access
+
+        super().__init__(name, bases, d)
+
+        if "get_data" in d:
+            _deprecation.warn(
+                f"{cls.__module__}.{cls.__qualname__} overrides BarGraph.get_data(). Call BarGraph.set_data() instead.",
+                since="4.0.10",
+                removed_in="7.0",
+            )
+            setattr(cls, "render", nocache_widget_render(cls))  # noqa: B010  # see WidgetMeta.__init__
+            cls._get_data = cls.get_data  # type: ignore[has-type]
+        cls.get_data = property(lambda self: self._get_data, nocache_bargraph_get_data)
+
+
+def nocache_bargraph_get_data(
+    self: BarGraph,
+    get_data_fn: Callable[
+        [tuple[int, int]],
+        tuple[Sequence[Sequence[float | int]], float, Sequence[float | int] | None],
+    ],
+) -> None:
+    """Disable caching on this bargraph because get_data_fn needs to be polled to get the latest data.
+
+    :warns DeprecationWarning: always, since assigning ``BarGraph.get_data`` is deprecated.
+    """
+    _deprecation.warn(
+        "Assigning BarGraph.get_data is deprecated. Call BarGraph.set_data() instead.",
+        since="4.0.10",
+        removed_in="7.0",
+    )
+    self.render = nocache_widget_render_instance(self)  # type: ignore[assignment]
+    self._get_data = get_data_fn  # type: ignore[assignment]  # pylint: disable=protected-access
+
+
+class BarGraphError(WidgetError):
+    """BarGraph related errors."""
+
+
+class BarGraph(Widget, metaclass=BarGraphMeta):
+    """Box widget that renders a bar graph from a sequence of data values.
+
+    .. deprecated:: 4.0.10
+        Overriding ``get_data()`` in a subclass, or assigning ``get_data`` on an instance,
+        is supported for backwards compatibility only.
+        Call :meth:`set_data` instead, so that the rendered canvas can be cached.
+        This API will be removed in version 7.0.
+    """
+
+    _sizing = frozenset([Sizing.BOX])
+
+    ignore_focus = True
+
+    # pyrefly: ignore[unsupported-operation]  # a str enum member is a str
+    eighths = BAR_SYMBOLS.VERTICAL[:8]  # Full height is done by style
+    hlines = "_⎺⎻─⎼⎽"
+
+    def __init__(
+        self,
+        attlist: Sequence[str | tuple[str, str]],
+        hatt: list[str] | None = None,
+        satt: Mapping[tuple[int, int], str] | None = None,
+    ) -> None:
+        """Create a bar graph with the passed display characteristics.
+
+        See :meth:`set_segment_attributes` for a description of the parameters.
+        """
+        super().__init__()
+        self.set_segment_attributes(attlist, hatt, satt)
+        self.set_data([], 1, None)
+        self.set_bar_width(None)
+
+    def set_segment_attributes(
+        self,
+        attlist: Sequence[str | tuple[str, str]],
+        hatt: list[str] | None = None,
+        satt: Mapping[tuple[int, int], str] | None = None,
+    ) -> None:
+        """Set the display attributes to use for the bar graph's segments.
+
+        :param attlist: list containing display attribute or
+                        (display attribute, character) tuple for background,
+                        first segment, and optionally following segments.
+                        ie. len(attlist) == num segments+1
+                        character defaults to ' ' if not specified.
+        :param hatt: list containing attributes for horizontal lines. First
+                     element is for lines on background, second is for lines
+                     on first segment, third is for lines on second segment
+                     etc.
+        :param satt: dictionary containing attributes for smoothed
+                     transitions of bars in UTF-8 display mode. The values
+                     are in the form:
+        :raises BarGraphError: *attlist* has fewer than two entries, or *satt* is not a mapping of valid ``(fg, bg)``
+            index pairs with ``fg`` above ``bg``.
+
+                       (fg,bg) : attr
+
+                     fg and bg are integers where 0 is the graph background,
+                     1 is the first segment, 2 is the second, ...
+                     fg > bg in all values.  attr is an attribute with a
+                     foreground corresponding to fg and a background
+                     corresponding to bg.
+
+        If satt is not None and the bar graph is being displayed in
+        a terminal using the UTF-8 encoding then the character cell
+        that is shared between the segments specified will be smoothed
+        with using the UTF-8 vertical eighth characters.
+
+        eg: set_segment_attributes( ['no', ('unsure',"?"), 'yes'] )
+        will use the attribute 'no' for the background (the area from
+        the top of the graph to the top of the bar), question marks
+        with the attribute 'unsure' will be used for the topmost
+        segment of the bar, and the attribute 'yes' will be used for
+        the bottom segment of the bar.
+        """
+        self.attr = []
+        self.char = []
+        if len(attlist) < 2:
+            raise BarGraphError(f"attlist must include at least background and seg1: {attlist!r}")
+        for a in attlist:
+            if not isinstance(a, tuple):
+                self.attr.append(a)
+                self.char.append(" ")
+            else:
+                attr, ch = a
+                self.attr.append(attr)
+                self.char.append(ch)
+
+        self.hatt: list[str] = []
+        hatt_list: list[str]
+        if hatt is None:
+            hatt_list = [self.attr[0]]
+        elif isinstance(hatt, list):
+            hatt_list = hatt
+        else:
+            hatt_list = [hatt]
+        self.hatt = hatt_list
+
+        if satt is None:
+            satt = {}
+        for i in satt.items():
+            try:
+                (fg, bg), attr = i
+            except ValueError as exc:
+                raise BarGraphError(f"satt not in (fg,bg:attr) form: {i!r}").with_traceback(exc.__traceback__) from exc
+            if not isinstance(fg, int) or fg >= len(attlist):
+                raise BarGraphError(f"fg not valid integer: {fg!r}")
+            if not isinstance(bg, int) or bg >= len(attlist):
+                raise BarGraphError(f"bg not valid integer: {fg!r}")
+            if fg <= bg:
+                raise BarGraphError(f"fg ({fg}) not > bg ({bg})")
+        self.satt = satt
+
+    def set_data(
+        self,
+        bardata: Sequence[Sequence[float | int]],
+        top: float,
+        hlines: Sequence[float | int] | None = None,
+    ) -> None:
+        """
+        Store bar data, bargraph top and horizontal line positions.
+
+        :param bardata: a list of bar values.
+        :param top: maximum value for segments within bardata
+        :param hlines: None or a bar value marking horizontal line positions
+
+        bar values are [ segment1, segment2, ... ] lists where top is
+        the maximal value corresponding to the top of the bar graph and
+        segment1, segment2, ... are the values for the top of each segment of this bar.
+        Simple bar graphs will only have one segment in each bar value.
+
+        Eg: if top is 100 and there is a bar value of [ 80, 30 ] then
+        the top of this bar will be at 80% of full height of the graph
+        and it will have a second segment that starts at 30%.
+        """
+        if hlines is not None:
+            # NaN compares false with every value, so sorting with it in place leaves the rest out of order.
+            hlines = sorted((h for h in hlines if not (isinstance(h, float) and math.isnan(h))), reverse=True)
+
+        self.data = bardata, top, hlines
+        self._invalidate()
+
+    def _get_data(
+        self,
+        size: tuple[int, int],
+    ) -> tuple[Sequence[Sequence[float | int]], float, Sequence[float | int] | None]:
+        """
+        Return (bardata, top, hlines).
+
+        This function is called by render to retrieve the data for the graph.
+        It may be overloaded to create a dynamic bar graph.
+
+        This implementation will truncate the bardata list returned if not all bars will fit within maxcol.
+        """
+        (maxcol, maxrow) = size
+        bardata, top, hlines = self.data
+        widths = self.calculate_bar_widths((maxcol, maxrow), bardata)
+
+        if len(bardata) > len(widths):
+            return bardata[: len(widths)], top, hlines
+
+        return bardata, top, hlines
+
+    def set_bar_width(self, width: int | None) -> None:
+        """
+        Set a preferred bar width for calculate_bar_widths to use.
+
+        :param width: width of bar or None for automatic width adjustment
+        :raises ValueError: *width* is not positive.
+        """
+        if width is not None and width <= 0:
+            raise ValueError(width)
+        self.bar_width = width
+        self._invalidate()
+
+    def calculate_bar_widths(
+        self,
+        size: tuple[int, int],
+        bardata: Sequence[Sequence[float | int]],
+    ) -> list[int]:
+        """
+        Return a list of bar widths, one for each bar in data.
+
+        If self.bar_width is None this implementation will stretch
+        the bars across the available space specified by maxcol.
+        """
+        (maxcol, _maxrow) = size
+
+        if self.bar_width is not None:
+            return [self.bar_width] * min(len(bardata), maxcol // self.bar_width)
+
+        if len(bardata) >= maxcol:
+            return [1] * maxcol
+
+        widths = []
+        grow = maxcol
+        remain = len(bardata)
+        for _row in bardata:
+            w = int(float(grow) / remain + 0.5)
+            widths.append(w)
+            grow -= w
+            remain -= 1
+        return widths
+
+    def selectable(self) -> Literal[False]:
+        """Return False."""
+        return False
+
+    def use_smoothed(self) -> bool:
+        """Return whether smoothed (sub-character resolution) rendering can be used."""
+        return bool(self.satt and get_encoding_mode() == "utf8")
+
+    def calculate_display(
+        self,
+        size: tuple[int, int],
+    ) -> list[tuple[int, list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]]]:
+        """Calculate display data."""
+        (maxcol, maxrow) = size
+        bardata, top, hlines = self._get_data((maxcol, maxrow))
+        widths = self.calculate_bar_widths((maxcol, maxrow), bardata)
+
+        disp_inner: list[tuple[int, list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]]]
+        if self.use_smoothed():
+            disp_inner = self.smooth_display(calculate_bargraph_display(bardata, top, widths, maxrow * 8))
+        else:
+            disp_inner = calculate_bargraph_display(bardata, top, widths, maxrow)  # type: ignore[assignment]
+
+        if hlines:
+            disp_inner = self.hlines_display(disp_inner, top, hlines, maxrow)
+
+        return disp_inner
+
+    def hlines_display(
+        self,
+        disp: list[tuple[int, list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]]],
+        top: float,
+        hlines: Sequence[float | int],
+        maxrow: int,
+    ) -> list[tuple[int, list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]]]:
+        """Add hlines to display structure represented as bar_type tuple values.
+
+        The tuple is ``(bg, 0-5)`` where bg is the segment that has the hline on it, and 0-5 is the hline
+        graphic to use where 0 is a regular underscore and 1-5 are the UTF-8 horizontal scan line characters.
+        """
+        if self.use_smoothed():
+            shiftr = 0.0
+            r = [
+                (0.2, 1),
+                (0.4, 2),
+                (0.6, 3),
+                (0.8, 4),
+                (1.0, 5),
+            ]
+        else:
+            shiftr = 0.5
+            r = [
+                (1.0, 0),
+            ]
+
+        # reverse the hlines to match screen ordering
+        rhl: list[float] = []
+        for h in hlines:
+            try:
+                rh = float(top - h) * maxrow / top - shiftr  # noqa: FURB123  # an int too big for a float must overflow
+            except (OverflowError, ZeroDivisionError):
+                # out of float range, or a zero top: the line has no row in the graph
+                continue
+            # the range check also drops NaN and infinity
+            if 0 <= rh < math.inf:
+                rhl.append(rh)
+
+        # build a list of rows that will have hlines
+        hrows = []
+        last_i = -1
+        for rh in rhl:
+            i = int(rh)
+            if i == last_i:
+                continue
+            f = rh - i
+            for spl, chnum in r:
+                if f < spl:
+                    hrows.append((i, chnum))
+                    break
+            last_i = i
+
+        # fill hlines into disp data
+        def fill_row(
+            row: list[tuple[int | tuple[int, int] | tuple[int, int, int], int]],
+            chnum: int,
+        ) -> list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]:
+            rout: list[tuple[int | tuple[int, int] | tuple[int, int, int], int]] = []
+            for bar_type, width in row:
+                if isinstance(bar_type, int) and len(self.hatt) > bar_type:
+                    rout.append(((bar_type, chnum), width))
+                    continue
+                rout.append((bar_type, width))
+            return rout
+
+        o = []
+        k = 0
+        rnum = 0
+        for y_count, row in disp:
+            if k >= len(hrows):
+                o.append((y_count, row))
+                continue
+            end_block = rnum + y_count
+            while k < len(hrows) and hrows[k][0] < end_block:
+                i, chnum = hrows[k]
+                if i - rnum > 0:
+                    o.append((i - rnum, row))
+                o.append((1, fill_row(row, chnum)))
+                rnum = i + 1
+                k += 1
+            if rnum < end_block:
+                o.append((end_block - rnum, row))
+                rnum = end_block
+
+        return o
+
+    def smooth_display(
+        self,
+        disp: list[tuple[int, list[tuple[int, int]]]],
+    ) -> list[tuple[int, list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]]]:
+        """Smooth (col, row*8) display into (col, row) display using UTF vertical eighth characters.
+
+        The characters are represented as bar_type tuple values ``(fg, bg, 1-7)`` where fg is the lower
+        segment, bg is the upper segment and 1-7 is the vertical eighth character to use.
+
+        :raises BarGraphError: the smoothed rows do not add up to the graph height.
+        """
+        o: list[tuple[int, list[tuple[int | tuple[int, int] | tuple[int, int, int], int]]]] = []
+        r = 0  # row remainder
+
+        def seg_combine(
+            a: tuple[int | tuple[int, int] | tuple[int, int, int], int],
+            b: tuple[int | tuple[int, int] | tuple[int, int, int], int],
+        ) -> tuple[
+            tuple[int | tuple[int, int] | tuple[int, int, int], int],
+            tuple[int | tuple[int, int] | tuple[int, int, int], int] | None,
+            tuple[int | tuple[int, int] | tuple[int, int, int], int] | None,
+        ]:
+            (bt1, w1), (bt2, w2) = a, b
+            if (bt1, w1) == (bt2, w2):
+                return (bt1, w1), None, None
+            wmin = min(w1, w2)
+            l1: tuple[int | tuple[int, int] | tuple[int, int, int], int] | None = None
+            l2: tuple[int | tuple[int, int] | tuple[int, int, int], int] | None = None
+            if w1 > w2:
+                l1 = (bt1, w1 - w2)
+            elif w2 > w1:
+                l2 = (bt2, w2 - w1)
+            if isinstance(bt1, tuple):
+                return (bt1, wmin), l1, l2
+            if (bt2, bt1) not in self.satt:
+                if r < 4:
+                    return (bt2, wmin), l1, l2
+                return (bt1, wmin), l1, l2
+            return ((bt2, bt1, 8 - r), wmin), l1, l2  # type: ignore[return-value]
+
+        def row_combine_last(
+            count: int,
+            row: list[tuple[int | tuple[int, int] | tuple[int, int, int], int]],
+        ) -> None:
+            """Merge *row* into the last row of the output, joining runs that share a bar type.
+
+            :raises BarGraphError: *row* is shorter than the row it is merged into.
+            """
+            o_count, o_row = o[-1]
+            # deque gives O(1) popleft()/appendleft() instead of the O(n) list.pop(0) and
+            # [x, *lst] prepend this loop would otherwise do on every iteration.
+            row_remaining: deque[tuple[int | tuple[int, int] | tuple[int, int, int], int]] = deque(row)
+            o_row_remaining: deque[tuple[int | tuple[int, int] | tuple[int, int, int], int]] = deque(o_row)
+            widget_list: list[tuple[int | tuple[int, int] | tuple[int, int, int], int]] = []
+            while row_remaining:
+                (bt, w), l1, l2 = seg_combine(o_row_remaining.popleft(), row_remaining.popleft())
+                if widget_list and widget_list[-1][0] == bt:
+                    widget_list[-1] = (bt, widget_list[-1][1] + w)
+                else:
+                    widget_list.append((bt, w))
+                if l1:
+                    o_row_remaining.appendleft(l1)
+                if l2:
+                    row_remaining.appendleft(l2)
+
+            if o_row_remaining:
+                raise BarGraphError(list(o_row_remaining))
+
+            o[-1] = (o_count + count, widget_list)
+
+        # regroup into actual rows (8 disp rows == 1 actual row)
+        for y_count, row in disp:
+            if r:
+                count = min(8 - r, y_count)
+                row_combine_last(count, row)  # type: ignore[arg-type]
+                y_count -= count  # noqa: PLW2901
+                r += count
+                r %= 8
+                if not y_count:
+                    continue
+            if r != 0:
+                raise BarGraphError
+            # copy whole blocks
+            if y_count > 7:
+                o.append((y_count // 8 * 8, row))  # type: ignore[arg-type]
+                y_count %= 8  # noqa: PLW2901
+                if not y_count:
+                    continue
+            o.append((y_count, row))  # type: ignore[arg-type]
+            r = y_count
+        return [(y // 8, row) for (y, row) in o]
+
+    def render(
+        self,
+        size: tuple[int, int],  # type: ignore[override]
+        focus: bool = False,
+    ) -> CompositeCanvas:
+        """
+        Render BarGraph.
+
+        :raises BarGraphError: a graph character does not render as a single row.
+        """
+        (maxcol, maxrow) = size
+        disp = self.calculate_display((maxcol, maxrow))
+
+        combinelist: list[tuple[Canvas, typing.Any, bool]] = []
+        for y_count, row in disp:
+            widget_list = []
+            for bar_type, width in row:
+                if isinstance(bar_type, tuple):
+                    if len(bar_type) == 3:
+                        # vertical eighths
+                        fg, bg, k = bar_type
+                        a = self.satt[fg, bg]
+                        t = self.eighths[k] * width
+                    else:
+                        # horizontal lines
+                        bg, k = bar_type
+                        a = self.hatt[bg]
+                        t = self.hlines[k] * width
+                else:
+                    a = self.attr[bar_type]
+                    t = self.char[bar_type] * width
+                widget_list.append((a, t))
+            c = Text(widget_list).render((maxcol,))
+            if c.rows() != 1:
+                raise BarGraphError("Invalid characters in BarGraph!")
+            combinelist += [(c, None, False)] * y_count
+
+        if not combinelist:
+            # No rows: an empty combination would lose the width.
+            return CompositeCanvas(SolidCanvas(" ", maxcol, maxrow))
+        canv = CanvasCombine(combinelist)
+        return canv
+
+
+def calculate_bargraph_display(
+    bardata: Sequence[Sequence[float | int]],
+    top: float,
+    bar_widths: list[int],
+    maxrow: int,
+) -> list[tuple[int, list[tuple[int, int]]]]:
+    """Calculate a rendering of the bar graph described by data, bar_widths and height.
+
+    :param bardata: bar information with same structure as BarGraph.data
+    :param top: maximal value for bardata segments
+    :param bar_widths: list of integer column widths for each bar
+    :param maxrow: rows for display of bargraph
+    :returns: ``[(y_count, [(bar_type, width), ...]), ...]``, one outer tuple per set of identical rows.
+        *y_count* is the number of rows in the set,
+        and the list holds the runs displayed in the row repeated through the set.
+        Each inner tuple is a run of *width* characters of *bar_type*:
+        0 for the background, 1 for the 1st segment, 2 for the 2nd segment and so on.
+    :raises BarGraphError: *bardata* and *bar_widths* have different lengths.
+
+    This function should complete in approximately O(n+m) time, where
+    n is the number of bars displayed and m is the number of rows.
+    """
+    if len(bardata) != len(bar_widths):
+        raise BarGraphError
+
+    maxcol = sum(bar_widths)
+
+    # build intermediate data structure
+    rows: list[list[tuple[int, int, int]] | None] = [None] * maxrow
+
+    def add_segment(
+        seg_num: int,
+        col: int,
+        row: int,
+        width: int,
+        rows: list[list[tuple[int, int, int]] | None] = rows,
+    ) -> None:
+        row_data = rows[row]
+        if row_data:
+            last_seg, last_col, last_end = row_data[-1]
+            if last_end > col:
+                if last_col >= col:
+                    del row_data[-1]
+                else:
+                    row_data[-1] = (last_seg, last_col, col)
+            elif last_seg == seg_num and last_end == col:
+                row_data[-1] = (last_seg, last_col, last_end + width)
+                return
+        elif row_data is None:
+            rows[row] = []
+            row_data = rows[row]
+
+        row_data.append((seg_num, col, col + width))  # type: ignore[union-attr]  # it's initialised
+
+    col = 0
+    for barnum, bar in enumerate(bardata):
+        width = bar_widths[barnum]
+        if width < 1:
+            continue
+        # loop through in reverse order
+        tallest = maxrow
+        segments = scale_bar_values(bar, top, maxrow)
+        for k in range(len(bar) - 1, -1, -1):
+            s = segments[k]
+
+            if s >= maxrow:
+                continue
+            s = max(s, 0)
+            if s < tallest:
+                # add only properly-overlapped bars
+                tallest = s
+                add_segment(k + 1, col, s, width)
+        col += width
+
+    # print(repr(rows))
+    # build rowsets data structure
+    rowsets = []
+    y_count = 0
+    # The runs of the last distinct row, and the column each one starts at.
+    # The runs tile columns 0..maxcol, and two adjacent runs never have the same type.
+    last = [(0, maxcol)]
+    last_cols = [0]
+
+    for r in rows:
+        if r is None:
+            y_count += 1
+            continue
+        if y_count:
+            rowsets.append((y_count, last))
+            y_count = 0
+
+        # The segments in r are sorted by column and do not overlap.
+        # The new row is built left to right: runs between the segments are copied in bulk from the last row.
+        runs: list[tuple[int, int]] = []
+        cols: list[int] = []
+        pos = 0  # first run of the last row not copied or replaced yet
+        for seg_num, start, end in r:
+            # runs lo..hi-1 start at columns start..end and are replaced; run hi-1 holds the column right of it
+            lo = bisect.bisect_left(last_cols, start, pos)
+            hi = bisect.bisect_right(last_cols, end, lo)
+            runs += last[pos:lo]
+            cols += last_cols[pos:lo]
+            if cols and cols[-1] == start:
+                # the rest of a run split by the previous segment starts where this one does; it is rebuilt below
+                del runs[-1], cols[-1]
+            if runs and runs[-1][0] == seg_num:
+                runs[-1] = (seg_num, end - cols[-1])
+            else:
+                if runs:
+                    runs[-1] = (runs[-1][0], start - cols[-1])
+                runs.append((seg_num, end - start))
+                cols.append(start)
+            if end != maxcol:
+                after_num = last[hi - 1][0]
+                after_end = last_cols[hi] if hi < len(last_cols) else maxcol
+                if after_num == seg_num:
+                    runs[-1] = (seg_num, after_end - cols[-1])
+                else:
+                    runs.append((after_num, after_end - end))
+                    cols.append(end)
+            pos = hi
+        runs += last[pos:]
+        cols += last_cols[pos:]
+        last = runs
+        last_cols = cols
+        y_count += 1
+
+    if y_count:
+        rowsets.append((y_count, last))
+
+    return rowsets
+
+
+class GraphVScale(Widget):
+    """Box widget that renders a vertical scale of labels for a :class:`BarGraph`."""
+
+    _sizing = frozenset([Sizing.BOX])
+
+    def __init__(
+        self,
+        labels: Sequence[tuple[float | int, _TagMarkup]],
+        top: float,
+    ) -> None:
+        """
+        Build a vertical scale for the BarGraph widget, which can correspond to the BarGraph's horizontal lines.
+
+        :param labels: a sequence of ``(label position, label markup)`` pairs, where the position satisfies
+            ``0 < position < top`` and gives the y position of the label, and the markup is the text markup
+            for that label
+        :param top: top y position
+        """
+        super().__init__()
+        self.set_scale(labels, top)
+
+    def set_scale(
+        self,
+        labels: Sequence[tuple[float | int, _TagMarkup]],
+        top: float,
+    ) -> None:
+        """
+        Replace the labels and the top y position of the scale.
+
+        :param labels: a sequence of ``(label position, label markup)`` pairs, where the position satisfies
+            ``0 < position < top`` and gives the y position of the label, and the markup is the text markup
+            for that label
+        :param top: top y position
+        """
+        # NaN compares false with every value, so sorting with it in place leaves the rest out of order.
+        labels = sorted(
+            (label for label in labels if not (isinstance(label[0], float) and math.isnan(label[0]))),
+            reverse=True,
+        )
+
+        self.pos = []
+        self.txt = []
+        for y, markup in labels:
+            self.pos.append(y)
+            self.txt.append(Text(markup))
+        self.top = top
+
+    def selectable(self) -> Literal[False]:
+        """Return False."""
+        return False
+
+    def render(
+        self,
+        size: tuple[int, int],  # type: ignore[override]
+        focus: bool = False,
+    ) -> SolidCanvas | CompositeCanvas:
+        """Render GraphVScale."""
+        (maxcol, maxrow) = size
+        pl = scale_bar_values(self.pos, self.top, maxrow)
+
+        combinelist = []
+        rows = 0
+        for p, t in zip(pl, self.txt, strict=False):
+            p -= 1  # noqa: PLW2901
+            if p >= maxrow:
+                break
+            if p < rows:
+                continue
+            c = t.render((maxcol,))
+            if p > rows:
+                run = p - rows
+                c_composite = CompositeCanvas(c)
+                c_composite.pad_trim_top_bottom(run, 0)
+                c = c_composite  # type: ignore[assignment]
+            rows += c.rows()
+            combinelist.append((c, None, False))
+        if not combinelist:
+            return SolidCanvas(" ", size[0], size[1])
+
+        canvas = CanvasCombine(combinelist)
+        if maxrow - rows:
+            canvas.pad_trim_top_bottom(0, maxrow - rows)
+        return canvas
+
+
+def scale_bar_values(
+    bar: Sequence[float | int],
+    top: float,
+    maxrow: int,
+) -> list[int]:
+    """Return a list of bar values aliased to integer values of maxrow.
+
+    A value that is not a number counts as zero.
+    A value that scales to infinity, or is too large for a float, gives a row outside the range from 0 to *maxrow*.
+    A *top* that is zero, not a number, infinite or too large for a float gives ``maxrow + 1`` for every value.
+    """
+    try:
+        # float() raises OverflowError for an int too large for a float; GraalPy's math.isfinite() accepts one.
+        valid_top = math.isfinite(top) and math.isfinite(float(top)) and top != 0  # noqa: FURB123
+    except OverflowError:
+        valid_top = False
+    if not valid_top:
+        return [maxrow + 1] * len(bar)
+
+    rows = []
+    for v in bar:
+        try:
+            value = float(v)
+        except OverflowError:
+            value = math.inf if v > 0 else -math.inf
+        scaled = value * maxrow / top
+        if math.isnan(scaled):
+            scaled = 0.0
+        elif math.isinf(scaled):
+            scaled = math.copysign(maxrow + 1.0, scaled)
+        rows.append(maxrow - int(scaled + 0.5))
+    return rows

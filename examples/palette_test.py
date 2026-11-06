@@ -17,20 +17,28 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
-"""
-Palette test.  Shows the available foreground and background settings
+"""Palette test.
+
+Shows the available foreground and background settings
 in monochrome, 16 color, 88 color, 256 color, and 24-bit (true) color modes.
 """
 
+from __future__ import annotations
+
 import re
-import sys
+import typing
 
 import urwid
-import urwid.raw_display
 
-CHART_TRUE="""
+_Widget = typing.TypeVar("_Widget", bound=urwid.AbstractWidget)
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Literal
+
+CHART_TRUE = """
 #e50000#e51000#e52000#e53000#e54000#e55000#e56000#e57000#e58000#e59000\
 #e5a000#e5b100#e5c100#e5d100#e5e100#d9e500#c9e500#b9e500#a9e500#99e500\
 #89e500#79e500#68e500#58e500#48e500#38e500#28e500#18e500#08e500#00e507\
@@ -247,27 +255,28 @@ yellow_   light_red   light_magenta   light_blue   light_cyan   light_green
 black_______    dark_gray___    light_gray__    white_______
 """
 
-ATTR_RE = re.compile("(?P<whitespace>[ \n]*)(?P<entry>(?:#[0-9A-Fa-f]{6})|(?:#[0-9A-Fa-f]{3})|(?:[^ \n]+))")
+ATTR_RE = re.compile(r"(?P<whitespace>[ \n]*)(?P<entry>(?:#[0-9A-Fa-f]{6})|(?:#[0-9A-Fa-f]{3})|(?:[^ \n]+))")
 LONG_ATTR = 7
-SHORT_ATTR = 4 # length of short high-colour descriptions which may
+SHORT_ATTR = 4  # length of short high-colour descriptions which may
 # be packed one after the next
 
 
+def parse_chart(
+    chart: str,
+    convert: Callable[[str], tuple[urwid.AttrSpec, str] | None],
+) -> list[str | tuple[urwid.AttrSpec, str]]:
+    """Convert string chart into text markup with the correct attributes.
 
-
-def parse_chart(chart, convert):
-    """
-    Convert string chart into text markup with the correct attributes.
-
-    chart -- palette chart as a string
-    convert -- function that converts a single palette entry to an
-        (attr, text) tuple, or None if no match is found
+    :param chart: palette chart as a string
+    :param convert: function that converts a single palette entry to an (attr, text) tuple, or ``None`` if no
+                     match is found
+    :returns: text markup for the chart
     """
     out = []
-    for match in re.finditer(ATTR_RE, chart):
-        if match.group('whitespace'):
-            out.append(match.group('whitespace'))
-        entry = match.group('entry')
+    for match in ATTR_RE.finditer(chart):
+        if match.group("whitespace"):
+            out.append(match.group("whitespace"))
+        entry = match.group("entry")
         entry = entry.replace("_", " ")
         while entry:
             if chart == CHART_TRUE and len(entry) == LONG_ATTR:
@@ -279,85 +288,94 @@ def parse_chart(chart, convert):
             # try the first four characters
             if attrtext:
                 entry = entry[elen:].strip()
-            else: # try the whole thing
+            else:  # try the whole thing
                 attrtext = convert(entry.strip())
-                assert attrtext, "Invalid palette entry: %r" % entry
+                assert attrtext, f"Invalid palette entry: {entry!r}"  # noqa: S101  # "assert" is OK for examples
                 elen = len(entry)
                 entry = ""
             attr, text = attrtext
             if chart == CHART_TRUE:
-                out.append((attr, u"\u2584"))
+                out.append((attr, "▄"))
             else:
                 out.append((attr, text.ljust(elen)))
     return out
 
 
-def foreground_chart(chart, background, colors):
-    """
-    Create text markup for a foreground colour chart
+def foreground_chart(
+    chart: str,
+    background: str,
+    colors: Literal[1, 16, 88, 256, 16777216],
+) -> list[str | tuple[urwid.AttrSpec, str]]:
+    """Create text markup for a foreground colour chart.
 
-    chart -- palette chart as string
-    background -- colour to use for background of chart
-    colors -- number of colors (88 or 256)
+    :param chart: palette chart as string
+    :param background: colour to use for background of chart
+    :param colors: number of colors
+    :returns: text markup for the chart
     """
-    def convert_foreground(entry):
+
+    def convert_foreground(entry: str) -> tuple[urwid.AttrSpec, str] | None:
         try:
             attr = urwid.AttrSpec(entry, background, colors)
         except urwid.AttrSpecError:
             return None
         return attr, entry
+
     return parse_chart(chart, convert_foreground)
 
-def background_chart(chart, foreground, colors):
-    """
-    Create text markup for a background colour chart
 
-    chart -- palette chart as string
-    foreground -- colour to use for foreground of chart
-    colors -- number of colors (88 or 256)
+def background_chart(
+    chart: str,
+    foreground: str,
+    colors: Literal[1, 16, 88, 256, 16777216],
+) -> list[str | tuple[urwid.AttrSpec, str]]:
+    """Create text markup for a background colour chart.
 
-    This will remap 8 <= colour < 16 to high-colour versions
-    in the hopes of greater compatibility
+    Remaps 8 <= colour < 16 to high-colour versions in the hopes of greater compatibility.
+
+    :param chart: palette chart as string
+    :param foreground: colour to use for foreground of chart
+    :param colors: number of colors
+    :returns: text markup for the chart
     """
-    def convert_background(entry):
+
+    def convert_background(entry: str) -> tuple[urwid.AttrSpec, str] | None:
         try:
             attr = urwid.AttrSpec(foreground, entry, colors)
         except urwid.AttrSpecError:
             return None
         # fix 8 <= colour < 16
-        if colors > 16 and attr.background_basic and \
-            attr.background_number >= 8:
+        if colors > 16 and attr.background_basic and attr.background_number >= 8:
             # use high-colour with same number
-            entry = 'h%d'%attr.background_number
+            entry = f"h{attr.background_number:d}"
             attr = urwid.AttrSpec(foreground, entry, colors)
         return attr, entry
+
     return parse_chart(chart, convert_background)
 
 
-def main():
+def main() -> None:
+    """Run the palette test example program."""
     palette = [
-        ('header', 'black,underline', 'light gray', 'standout,underline',
-            'black,underline', '#88a'),
-        ('panel', 'light gray', 'dark blue', '',
-            '#ffd', '#00a'),
-        ('focus', 'light gray', 'dark cyan', 'standout',
-            '#ff8', '#806'),
-        ]
+        ("header", "black,underline", "light gray", "standout,underline", "black,underline", "#88a"),
+        ("panel", "light gray", "dark blue", "", "#ffd", "#00a"),
+        ("focus", "light gray", "dark cyan", "standout", "#ff8", "#806"),
+    ]
 
-    screen = urwid.raw_display.Screen()
+    screen = urwid.display.raw.Screen()
     screen.register_palette(palette)
 
-    lb = urwid.SimpleListWalker([])
-    chart_offset = None  # offset of chart in lb list
+    lb: urwid.SimpleListWalker[urwid.widget.AbstractFlowWidget] = urwid.SimpleListWalker([])
+    chart_offset = 0  # offset of chart in lb list
 
-    mode_radio_buttons = []
-    chart_radio_buttons = []
+    mode_radio_buttons: list[urwid.RadioButton] = []
+    chart_radio_buttons: list[urwid.RadioButton] = []
 
-    def fcs(widget):
+    def fcs(widget: _Widget) -> urwid.AttrMap[_Widget]:
         # wrap widgets that can take focus
-        return urwid.AttrMap(widget, None, 'focus')
+        return urwid.AttrMap(widget, None, "focus")
 
-    def set_mode(colors, is_foreground_chart):
+    def set_mode(colors: Literal[1, 16, 88, 256, 16777216], is_foreground_chart: bool) -> None:
         # set terminal mode and redraw chart
         screen.set_terminal_properties(colors)
         screen.reset_default_terminal_palette()
@@ -366,64 +384,74 @@ def main():
         if colors == 1:
             lb[chart_offset] = urwid.Divider()
         else:
-            chart = {16: CHART_16, 88: CHART_88, 256: CHART_256, 2**24: CHART_TRUE}[colors]
-            txt = chart_fn(chart, 'default', colors)
-            lb[chart_offset] = urwid.Text(txt, wrap='clip')
+            chart: str = {16: CHART_16, 88: CHART_88, 256: CHART_256, 2**24: CHART_TRUE}[colors]
+            txt = chart_fn(chart, "default", colors)
+            lb[chart_offset] = urwid.Text(txt, wrap=urwid.CLIP)
 
-    def on_mode_change(rb, state, colors):
+    def on_mode_change(colors: Literal[1, 16, 88, 256, 16777216], rb: urwid.RadioButton, state: bool) -> None:
         # if this radio button is checked
         if state:
             is_foreground_chart = chart_radio_buttons[0].state
-            set_mode(colors, is_foreground_chart)
+            set_mode(colors, typing.cast("bool", is_foreground_chart))
 
-    def mode_rb(text, colors, state=False):
+    def mode_rb(text: str, colors: int, state: bool = False) -> urwid.AttrMap[urwid.RadioButton]:
         # mode radio buttons
         rb = urwid.RadioButton(mode_radio_buttons, text, state)
-        urwid.connect_signal(rb, 'change', on_mode_change, colors)
+        urwid.connect_signal(rb, "change", on_mode_change, user_args=(colors,))
         return fcs(rb)
 
-    def on_chart_change(rb, state):
+    def on_chart_change(rb: urwid.RadioButton, state: bool) -> None:
         # handle foreground check box state change
         set_mode(screen.colors, state)
 
-    def click_exit(button):
-        raise urwid.ExitMainLoop()
+    def click_exit(button: urwid.Button) -> typing.NoReturn:
+        raise urwid.ExitMainLoop
 
-    lb.extend([
-        urwid.AttrMap(urwid.Text("Urwid Palette Test"), 'header'),
-        urwid.AttrMap(urwid.Columns([
-            urwid.Pile([
-                mode_rb("Monochrome", 1),
-                mode_rb("16-Color", 16, True),
-                mode_rb("88-Color", 88),
-                mode_rb("256-Color", 256),
-                mode_rb("24-bit Color", 2**24),]),
-            urwid.Pile([
-                fcs(urwid.RadioButton(chart_radio_buttons,
-                    "Foreground Colors", True, on_chart_change)),
-                fcs(urwid.RadioButton(chart_radio_buttons,
-                    "Background Colors")),
-                urwid.Divider(),
-                fcs(urwid.Button("Exit", click_exit)),
-                ]),
-            ]),'panel')
-        ])
+    # select_navigation lets TAB / SHIFT TAB move through the mode buttons, then the chart buttons and Exit
+    lb.extend(
+        [
+            urwid.AttrMap(urwid.Text("Urwid Palette Test"), "header"),
+            urwid.AttrMap(
+                urwid.Columns(
+                    [
+                        urwid.Pile(
+                            [
+                                mode_rb("Monochrome", 1),
+                                mode_rb("16-Color", 16, True),
+                                mode_rb("88-Color", 88),
+                                mode_rb("256-Color", 256),
+                                mode_rb("24-bit Color", 2**24),
+                            ],
+                            select_navigation=True,
+                        ),
+                        urwid.Pile(
+                            [
+                                fcs(urwid.RadioButton(chart_radio_buttons, "Foreground Colors", True, on_chart_change)),
+                                fcs(urwid.RadioButton(chart_radio_buttons, "Background Colors")),
+                                urwid.Divider(),
+                                fcs(urwid.Button("Exit", click_exit)),
+                            ],
+                            select_navigation=True,
+                        ),
+                    ],
+                    select_navigation=True,
+                ),
+                "panel",
+            ),
+        ]
+    )
 
     chart_offset = len(lb)
-    lb.extend([
-        urwid.Divider() # placeholder for the chart
-        ])
+    lb.extend([urwid.Divider()])  # placeholder for the chart
 
-    set_mode(16, True) # displays the chart
+    set_mode(16, True)  # displays the chart
 
-    def unhandled_input(key):
-        if key in ('Q','q','esc'):
-            raise urwid.ExitMainLoop()
+    def unhandled_input(key: str | tuple[str, int, int, int]) -> None:
+        if key in {"Q", "q", "esc"}:
+            raise urwid.ExitMainLoop
 
-    urwid.MainLoop(urwid.ListBox(lb), screen=screen,
-        unhandled_input=unhandled_input).run()
+    urwid.MainLoop(urwid.ListBox(lb, select_navigation=True), screen=screen, unhandled_input=unhandled_input).run()
+
 
 if __name__ == "__main__":
     main()
-
-

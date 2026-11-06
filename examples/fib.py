@@ -17,96 +17,128 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
 """
-Urwid example fibonacci sequence viewer / unbounded data demo
+Urwid example fibonacci sequence viewer / unbounded data demo.
 
 Features:
 - custom list walker class for browsing infinite set
 - custom wrap mode "numeric" for wrapping numbers to right and bottom
 """
 
+from __future__ import annotations
+
+import typing
+
 import urwid
 
-class FibonacciWalker(urwid.ListWalker):
+if typing.TYPE_CHECKING:
+    from typing import Literal
+
+
+class FibonacciWalker(urwid.ListWalker[tuple[int, int], urwid.Text]):
     """ListWalker-compatible class for browsing fibonacci set.
 
     positions returned are (value at position-1, value at position) tuples.
     """
-    def __init__(self):
-        self.focus = (0,1)
+
+    def __init__(self) -> None:
+        """Initialize focused at the start of the fibonacci sequence."""
+        self.focus = (0, 1)
         self.numeric_layout = NumericLayout()
 
-    def _get_at_pos(self, pos):
+    def _get_at_pos(self, pos: tuple[int, int]) -> tuple[urwid.Text, tuple[int, int]]:
         """Return a widget and the position passed."""
-        return urwid.Text("%d"%pos[1], layout=self.numeric_layout), pos
+        return urwid.Text(f"{pos[1]:d}", layout=self.numeric_layout), pos
 
-    def get_focus(self):
+    def get_focus(self) -> tuple[urwid.Text, tuple[int, int]]:
+        """Return the widget and position for the current focus."""
         return self._get_at_pos(self.focus)
 
-    def set_focus(self, focus):
+    def set_focus(self, focus: tuple[int, int]) -> None:
+        """Set the focus position."""
         self.focus = focus
         self._modified()
 
-    def get_next(self, start_from):
-        a, b = start_from
-        focus = b, a+b
+    def get_next(self, position: tuple[int, int]) -> tuple[urwid.Text, tuple[int, int]]:
+        """Return the widget and position after the given position."""
+        a, b = position
+        focus = b, a + b
         return self._get_at_pos(focus)
 
-    def get_prev(self, start_from):
-        a, b = start_from
-        focus = b-a, a
+    def get_prev(self, position: tuple[int, int]) -> tuple[urwid.Text, tuple[int, int]]:
+        """Return the widget and position before the given position."""
+        a, b = position
+        focus = b - a, a
         return self._get_at_pos(focus)
 
-def main():
-    palette = [
-        ('body','black','dark cyan', 'standout'),
-        ('foot','light gray', 'black'),
-        ('key','light cyan', 'black', 'underline'),
-        ('title', 'white', 'black',),
-        ]
 
-    footer_text = [
-        ('title', "Fibonacci Set Viewer"), "    ",
-        ('key', "UP"), ", ", ('key', "DOWN"), ", ",
-        ('key', "PAGE UP"), " and ", ('key', "PAGE DOWN"),
+def main() -> None:
+    """Run the fibonacci sequence viewer application."""
+    palette: list[tuple[str, str, str] | tuple[str, str, str, str]] = [
+        ("body", "black", "dark cyan", "standout"),
+        ("foot", "light gray", "black"),
+        ("key", "light cyan", "black", "underline"),
+        (
+            "title",
+            "white",
+            "black",
+        ),
+    ]
+
+    footer_text: list[tuple[str, str] | str] = [
+        ("title", "Fibonacci Set Viewer"),
+        "    ",
+        ("key", "UP"),
+        ", ",
+        ("key", "DOWN"),
+        ", ",
+        ("key", "PAGE UP"),
+        " and ",
+        ("key", "PAGE DOWN"),
         " move view  ",
-        ('key', "Q"), " exits",
-        ]
+        ("key", "Q"),
+        " exits",
+    ]
 
-    def exit_on_q(input):
-        if input in ('q', 'Q'):
-            raise urwid.ExitMainLoop()
+    def exit_on_q(key: str | tuple[str, int, int, int]) -> None:
+        if key in {"q", "Q"}:
+            raise urwid.ExitMainLoop
 
-    listbox = urwid.ListBox(FibonacciWalker())
-    footer = urwid.AttrMap(urwid.Text(footer_text), 'foot')
-    view = urwid.Frame(urwid.AttrWrap(listbox, 'body'), footer=footer)
+    listbox: urwid.ListBox[tuple[int, int]] = urwid.ListBox(FibonacciWalker())
+    footer = urwid.AttrMap(urwid.Text(footer_text), "foot")
+    view: urwid.Frame[
+        urwid.AttrMap[urwid.ListBox[tuple[int, int]]],
+        None,
+        urwid.AttrMap[urwid.Text],
+    ] = urwid.Frame(urwid.AttrMap(listbox, "body"), footer=footer)
     loop = urwid.MainLoop(view, palette, unhandled_input=exit_on_q)
     loop.run()
 
 
 class NumericLayout(urwid.TextLayout):
-    """
-    TextLayout class for bottom-right aligned numbers
-    """
-    def layout( self, text, width, align, wrap ):
-        """
-        Return layout structure for right justified numbers.
-        """
+    """TextLayout class for bottom-right aligned numbers."""
+
+    def layout(
+        self,
+        text: str | bytes,
+        width: int,
+        align: Literal["left", "center", "right"] | urwid.Align,
+        wrap: Literal["any", "space", "clip", "ellipsis"] | urwid.WrapMode,
+    ) -> list[list[tuple[int, int, int | bytes] | tuple[int, int | None]]]:
+        """Return layout structure for right justified numbers."""
         lt = len(text)
-        r = lt % width # remaining segment not full width wide
+        r = lt % width  # remaining segment not full width wide
         if r:
-            linestarts = range( r, lt, width )
-            return [
-                # right-align the remaining segment on 1st line
-                [(width-r,None),(r, 0, r)]
-                # fill the rest of the lines
-                ] + [[(width, x, x+width)] for x in linestarts]
-        else:
-            linestarts = range( 0, lt, width )
-            return [[(width, x, x+width)] for x in linestarts]
+            layout: list[list[tuple[int, int, int | bytes] | tuple[int, int | None]]] = [
+                [(width - r, None), (r, 0, r)],  # right-align the remaining segment on 1st line
+            ]
+            layout.extend([(width, x, x + width)] for x in range(r, lt, width))  # fill the rest of the lines
+            return layout
+
+        return [[(width, x, x + width)] for x in range(0, lt, width)]
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

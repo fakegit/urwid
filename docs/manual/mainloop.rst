@@ -52,6 +52,119 @@ custom input handling is done from :meth:`MainLoop.unhandled_input`,
 it will be difficult to extend as your application gets more complicated.
 
 
+Running Another Program in the Terminal
+=======================================
+
+An application can hand the terminal to another program for a while, such as an
+editor on a temporary file, a pager or a shell, with the
+:meth:`MainLoop.paused` context manager::
+
+    editor = shlex.split(os.environ.get("EDITOR", "")) or ["vi"]  # "vim -f", "code --wait" carry arguments
+    with loop.paused():
+        subprocess.run([*editor, path], check=False)
+
+The screen is stopped for the block and started again afterwards, with the mouse
+tracking restored and the whole screen redrawn at the terminal's current size.
+The block holds the event loop until it ends, so no input, alarm or watched file
+is handled while the other program owns the terminal.
+
+
+Reaching the Running Loop
+=========================
+
+A widget or a callback finds the loop it runs under with
+:func:`get_running_loop`, instead of being handed the loop by the application::
+
+    class Clock(urwid.Text):
+        def start(self) -> None:
+            urwid.get_running_loop().set_alarm_in(1, self._tick)
+
+        def _tick(self, loop: urwid.MainLoop, _data: object) -> None:
+            self.set_text(time.strftime("%H:%M:%S"))
+            loop.set_alarm_in(1, self._tick)
+
+:func:`get_running_loop` raises :exc:`RuntimeError` when no loop is running;
+:func:`get_running_loop_or_none` returns ``None`` instead.
+
+A loop is the running loop:
+
+* in the thread and the asyncio or Trio task that called :meth:`MainLoop.run` or
+  :meth:`MainLoop.start`, until :meth:`MainLoop.stop`;
+* inside every alarm, watched file, watched pipe, input and render call the loop
+  makes, whichever task or context the event loop runs it in;
+* inside :meth:`MainLoop.draw_screen` and :meth:`MainLoop.process_input` called
+  by hand, also before the loop is started;
+* in everything that copies one of those contexts: a task made with
+  :func:`asyncio.create_task`, :func:`asyncio.to_thread`,
+  :meth:`contextvars.Context.run` on a copy from :func:`contextvars.copy_context`.
+
+A thread that does not copy the context sees the loop only if its context came
+from the loop's thread: a plain :class:`threading.Thread` and a function submitted
+to an executor run in the worker thread's own context, which is empty unless the
+interpreter gives each new thread a copy of its creator's context.
+Capture the loop on the loop's thread and pass it in, or submit
+``contextvars.copy_context().run(function)``.
+
+Once :meth:`MainLoop.stop` ran, no context sees the loop any more, including the
+ones copied while it was running, and no context keeps it alive.
+Callbacks the loop registered on an event loop it does not own, such as its watched
+files on an asyncio loop that goes on running, still refer to it until they are removed.
+A callback the stopped loop left on an event loop it does not own sees no running
+loop either.
+
+Being able to find the loop from another thread does not make it safe to use from
+there: change widgets and the screen only from the thread running the event loop,
+and hand the work over with :meth:`MainLoop.call_from_thread`, described below.
+Explicit arguments remain the way to give a loop to code that runs outside it.
+
+
+Work From Another Thread
+========================
+
+Widgets and the screen belong to the thread running the event loop.
+A worker thread hands its results to that thread with
+:meth:`MainLoop.call_from_thread`, which queues a call and wakes the loop::
+
+    def work(loop: urwid.MainLoop) -> None:
+        result = slow_computation()
+        loop.call_from_thread(status.set_text, f"Result: {result}")
+
+    def start(_button: urwid.Button) -> None:
+        threading.Thread(target=work, args=(urwid.get_running_loop(),), daemon=True).start()
+
+The loop is captured on the loop's thread, in the button handler, and passed to
+the worker, because a plain thread does not see the running loop.
+The call runs on the loop's thread like an alarm callback: the screen is redrawn
+afterwards, :exc:`ExitMainLoop` raised by it stops the loop, and any other
+exception is logged.
+Calls run in the order they were made, and a call made after the loop stopped
+raises :exc:`RuntimeError`.
+With a screen that has no event loop support, such as the curses screen, a call
+waits for the next input or alarm unless the loop polls: see
+:ref:`screens-without-event-loop-support`.
+It is safe to call from a signal handler as well.
+
+A worker that produces a stream of small updates, such as the lines of a log,
+does not make one call per line: each call costs a pass of the event loop.
+It collects the lines and asks for one drain while none is pending::
+
+    lines: collections.deque[str] = collections.deque(maxlen=1000)
+    drain_pending = threading.Event()
+
+    def drain() -> None:
+        drain_pending.clear()
+        while lines:
+            log.body.append(urwid.Text(lines.popleft()))
+
+    def on_line(line: str) -> None:  # on the worker thread
+        lines.append(line)
+        if not drain_pending.is_set():
+            drain_pending.set()
+            loop.call_from_thread(drain)
+
+``examples/thread_worker.py`` shows a worker reporting its progress and its result.
+
+
 .. _event-loops:
 
 Event Loops
@@ -59,9 +172,9 @@ Event Loops
 
 Urwid's event loop classes handle waiting for things for the
 :class:`MainLoop`. The different event loops allow you to
-integrate with Twisted_, Glib_, Tornado_, Asyncio_ libraries,
-or use a simple ``select``-based
-loop. Event loop classes abstract the particulars of waiting for input and
+integrate with Asyncio_, Twisted_, Glib_, Tornado_, ZMQ_ libraries,
+or use a simple ``select``-based loop.
+Event loop classes abstract the particulars of waiting for input and
 calling functions as a result of timeouts.
 
 You will typically only have a single event loop in your application, even if
@@ -73,10 +186,11 @@ Using this interface gives you the special handling
 of :exc:`ExitMainLoop` and other exceptions when using Glib_, Twisted_ or
 Tornado_ callbacks.
 
+.. _Asyncio: https://docs.python.org/3/library/asyncio.html
 .. _Twisted: http://twistedmatrix.com/trac/
 .. _Glib: http://developer.gnome.org/glib/stable/
 .. _Tornado: http://www.tornadoweb.org/
-.. _Asyncio: https://docs.python.org/3/library/asyncio.html
+.. _ZMQ: https://pyzmq.readthedocs.io/en/latest/
 
 ``SelectEventLoop``
 -------------------
@@ -93,6 +207,37 @@ created if none is passed to :class:`~urwid.main_loop.MainLoop`.
 
   :class:`SelectEventLoop reference <SelectEventLoop>`
 
+``AsyncioEventLoop``
+--------------------
+
+This event loop integrates with the asyncio module in Python.
+
+::
+
+    evl = urwid.AsyncioEventLoop()  # the running asyncio loop, or a new SelectorEventLoop of its own
+    loop = urwid.MainLoop(widget, event_loop=evl)
+
+.. note::
+
+    In case of multithreading or multiprocessing usage required, do not use executor directly!
+    Use instead method :meth:`run_in_executor` of :class:`AsyncioEventLoop`,
+    which forward API of the same method from asyncio Event Loop run_in_executor_.
+    A worker running there hands its results to the widgets with :meth:`MainLoop.call_from_thread`.
+
+.. warning::
+
+    For input handling, selectors based logic is used.
+    Under Windows OS only `SelectorEventLoop`_ is supported.
+
+.. note:: `uvloop` event loop is not supported officially.
+
+.. _run_in_executor: https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.run_in_executor
+.. _SelectorEventLoop: https://docs.python.org/3/library/asyncio-eventloop.html?highlight=selectoreventloop#asyncio.SelectorEventLoop
+
+.. seealso::
+
+  :class:`AsyncioEventLoop reference <AsyncioEventLoop>`
+
 ``TwistedEventLoop``
 --------------------
 
@@ -106,12 +251,22 @@ application.
 
     loop = urwid.MainLoop(widget, event_loop=urwid.TwistedEventLoop())
 
+.. note::
+
+    In case of threading usage required, please use twisted deferToThread_ method. It supports callbacks if needed.
+    Executors from `concurrent.futures` are not supported.
+
+.. _deferToThread: https://docs.twisted.org/en/stable/core/howto/threading.html#getting-results
+
 .. seealso::
 
   :class:`TwistedEventLoop reference <TwistedEventLoop>`
 
 ``GLibEventLoop``
 -----------------
+
+.. deprecated:: 4.1.7
+    This API will be removed in version 6.0.
 
 This event loop uses GLib's event loop. This is useful if you are building an
 application that depends on DBus events, but don't want to base your
@@ -136,24 +291,27 @@ This event loop integrates with Tornado.
     evl = urwid.TornadoEventLoop(IOLoop())
     loop = urwid.MainLoop(widget, event_loop=evl)
 
+.. note::
+
+    In case of multithreading or multiprocessing usage required, do not use executor directly!
+    Use instead method :meth:`run_in_executor` of :class:`TornadoEventLoop`,
+    which forward API of the same method from `tornado.ioloop.IOLoop` (and internally use asyncio run_in_executor_).
+    A worker running there hands its results to the widgets with :meth:`MainLoop.call_from_thread`.
+
 .. seealso::
 
   :class:`TornadoEventLoop reference <TornadoEventLoop>`
 
-``AsyncioEventLoop``
---------------------
+``ZMQEventLoop``
+----------------
 
-This event loop integrates with the asyncio module in Python 3.4,
-the asyncio package available for Python 3.3 or the trollius
-package available for Python 2.
+This event loop integrates with 0MQ.
 
 ::
 
-    import asyncio
-    evl = urwid.AsyncioEventLoop(loop=asyncio.get_event_loop())
+    evl = urwid.ZMQEventLoop()
     loop = urwid.MainLoop(widget, event_loop=evl)
 
 .. seealso::
 
-  :class:`AsyncioEventLoop reference <AsyncioEventLoop>`
-
+  :class:`ZMQEventLoop reference <ZMQEventLoop>`

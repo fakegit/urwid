@@ -17,86 +17,178 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
-"""
-Keyboard test application
-"""
+"""Keyboard test application."""
 
-import urwid.curses_display
-import urwid.raw_display
-import urwid.web_display
+from __future__ import annotations
+
+import argparse
+import logging
+import typing
+
 import urwid
 
-import sys
+loop_cls: type[urwid.EventLoop] | None
+# turn on the kitty keyboard protocol or modifyOtherKeys, which only the raw display speaks
+extended_keys = False
 
-if urwid.web_display.is_web_request():
-    Screen = urwid.web_display.Screen
+if urwid.display.web.is_web_request():
+    Screen = urwid.display.web.Screen
+    loop_cls = urwid.SelectEventLoop
 else:
-    if len(sys.argv)>1 and sys.argv[1][:1] == "r":
-        Screen = urwid.raw_display.Screen
+    event_loops: dict[str, type[urwid.EventLoop] | None] = {
+        "none": None,
+        "select": urwid.SelectEventLoop,
+        "asyncio": urwid.AsyncioEventLoop,
+    }
+    if hasattr(urwid, "TornadoEventLoop"):
+        event_loops["tornado"] = urwid.TornadoEventLoop
+    if hasattr(urwid, "TwistedEventLoop"):
+        event_loops["twisted"] = urwid.TwistedEventLoop
+    if hasattr(urwid, "TrioEventLoop"):
+        event_loops["trio"] = urwid.TrioEventLoop
+    if hasattr(urwid, "ZMQEventLoop"):
+        event_loops["zmq"] = urwid.ZMQEventLoop
+
+    displays: dict[str, type[urwid.display.BaseScreen]] = {
+        "raw": urwid.display.raw.Screen,
+    }
+    try:
+        from urwid.display import curses
+    except ImportError:
+        pass
     else:
-        Screen = urwid.curses_display.Screen
+        displays["curses"] = curses.Screen
 
-def key_test():
-    screen = Screen()
-    header = urwid.Text("Values from get_input(). Q exits.")
-    header = urwid.AttrWrap(header,'header')
-    lw = urwid.SimpleListWalker([])
-    listbox = urwid.ListBox(lw)
-    listbox = urwid.AttrWrap(listbox, 'listbox')
-    top = urwid.Frame(listbox, header)
+    parser = argparse.ArgumentParser(description="Input test")
+    parser.add_argument(
+        "--display",
+        choices=displays,
+        default="raw",
+        help="Display module to use (default is 'raw' as most advanced)",
+    )
+    parser.add_argument(
+        "--extended-keys",
+        action="store_true",
+        help="Ask the terminal to report keys the legacy encodings cannot tell apart, such as ctrl enter (raw only)",
+    )
+    group = parser.add_argument_group("Advanced Options")
+    group.add_argument(
+        "--event-loop",
+        choices=event_loops,
+        default="none",
+        help="Event loop to use ('none' = use the default)",
+    )
+    group.add_argument(
+        "--debug-log",
+        action="store_true",
+        help="Enable debug logging",
+    )
 
-    def input_filter(keys, raw):
-        if 'q' in keys or 'Q' in keys:
+    args = parser.parse_args()
+
+    Screen = displays[args.display]
+    loop_cls = event_loops[args.event_loop]
+    if args.extended_keys and args.display != "raw":
+        parser.error("--extended-keys needs the raw display")
+    extended_keys = args.extended_keys
+
+    if args.debug_log:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            filename="debug.log",
+            format=(
+                "%(levelname)1.1s %(asctime)s | %(threadName)s | %(name)s \n"
+                "\t%(message)s\n"
+                "-------------------------------------------------------------------------------"
+            ),
+            datefmt="%d-%b-%Y %H:%M:%S",
+            force=True,
+        )
+        logging.captureWarnings(True)
+
+
+# Dark Monokai: (name, 16-color fg, 16-color bg, monochrome settings, high-color fg, high-color bg).
+# "key" and "mouse" set a foreground only and inherit the background of the list box around them.
+PALETTE: typing.Final = (
+    ("header", "black", "dark green", "standout", "#272822", "#a6e22e"),
+    ("listbox", "light gray", "black", None, "#f8f8f2", "#272822"),
+    ("key", "yellow,bold", "inherit", "bold", "#e6db74,bold", "inherit"),
+    ("mouse", "light cyan,bold", "inherit", "bold,underline", "#66d9ef,bold", "inherit"),
+)
+
+
+def key_test() -> None:
+    """Run the main loop that echoes each keypress and its raw bytes to the screen."""
+    screen = urwid.display.raw.Screen(extended_keys=True) if extended_keys else Screen()
+    header = urwid.AttrMap(
+        urwid.Text("Values from get_input(). Q exits."),
+        "header",
+    )
+    lw: urwid.SimpleListWalker[urwid.Columns] = urwid.SimpleListWalker([])
+    listbox = urwid.AttrMap(
+        urwid.ListBox(lw),
+        "listbox",
+    )
+    top: urwid.Frame[urwid.AttrMap[urwid.ListBox[int]], urwid.AttrMap[urwid.Text], None] = urwid.Frame(listbox, header)
+
+    def input_filter(
+        keys: list[str | tuple[str, int, int, int]], raw: list[int]
+    ) -> list[str | tuple[str, int, int, int]]:
+        """Append a display row for *keys* and *raw* to the list box, then return *keys* unchanged.
+
+        :raises urwid.ExitMainLoop: :kbd:`q` or :kbd:`Q` is among *keys*.
+        """
+        if "q" in keys or "Q" in keys:
             raise urwid.ExitMainLoop
 
-        t = []
-        a = []
+        t: list[str | tuple[str, str]] = []
         for k in keys:
-            if type(k) == tuple:
-                out = []
+            if isinstance(k, tuple):
+                out: list[str | tuple[str, str]] = []
                 for v in k:
                     if out:
-                        out += [', ']
-                    out += [('key',repr(v))]
-                t += ["("] + out + [")"]
+                        out += [", "]
+                    out += [("mouse", repr(v))]
+                t += ["(", *out, ")"]
             else:
-                t += ["'",('key',k),"' "]
+                t += ["'", ("key", k), "' "]
 
-        rawt = urwid.Text(", ".join(["%d"%r for r in raw]))
+        rawt = urwid.Text(", ".join(f"{r:d}" for r in raw))
 
         if t:
-            lw.append(
-                urwid.Columns([
-                    ('weight',2,urwid.Text(t)),
-                    rawt])
-                )
-            listbox.set_focus(len(lw)-1,'above')
+            lw.append(urwid.Columns([(urwid.WEIGHT, 2, urwid.Text(t)), rawt]))
+            listbox.original_widget.set_focus(len(lw) - 1, "above")
         return keys
 
-    loop = urwid.MainLoop(top, [
-        ('header', 'black', 'dark cyan', 'standout'),
-        ('key', 'yellow', 'dark blue', 'bold'),
-        ('listbox', 'light gray', 'black' ),
-        ], screen, input_filter=input_filter)
+    loop = urwid.MainLoop(
+        top,
+        PALETTE,
+        screen,
+        input_filter=input_filter,
+        event_loop=loop_cls() if loop_cls is not None else None,
+    )
+
+    old: tuple[typing.Any, ...] | None = ()
 
     try:
-        old = screen.tty_signal_keys('undefined','undefined',
-            'undefined','undefined','undefined')
+        # pyrefly: ignore[missing-attribute]  # not on BaseScreen, but on every display offered here
+        old = screen.tty_signal_keys("undefined", "undefined", "undefined", "undefined", "undefined")
         loop.run()
     finally:
-        screen.tty_signal_keys(*old)
+        if old:
+            # pyrefly: ignore[missing-attribute]  # not on BaseScreen, but on every display offered here
+            screen.tty_signal_keys(*old)
 
 
-
-
-def main():
-    urwid.web_display.set_preferences('Input Test')
-    if urwid.web_display.handle_short_request():
+def main() -> None:
+    """Run the keyboard input test application."""
+    urwid.display.web.set_preferences("Input Test")
+    if urwid.display.web.handle_short_request():
         return
     key_test()
 
 
-if '__main__'==__name__ or urwid.web_display.is_web_request():
+if __name__ == "__main__" or urwid.display.web.is_web_request():
     main()

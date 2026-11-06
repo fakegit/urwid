@@ -1,0 +1,510 @@
+from __future__ import annotations
+
+import locale
+import unittest
+
+import urwid
+from urwid import str_util, util
+from urwid.display import escape
+
+
+class CalcWidthTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.old_encoding = util.get_encoding()
+
+    def tearDown(self) -> None:
+        urwid.set_encoding(self.old_encoding)
+
+    def wtest(self, desc, s, exp):
+        s = s.encode("iso8859-1")
+        result = str_util.calc_width(s, 0, len(s))
+        assert result == exp, f"{desc} got:{result!r} expected:{exp!r}"
+
+    def test1(self):
+        util.set_encoding("utf-8")
+        self.wtest("narrow", "hello", 5)
+        self.wtest("wide char", "\xe6\x9b\xbf", 2)
+        self.wtest("invalid", "\xe6", 1)
+        self.wtest("zero width", "\xcc\x80", 0)
+        self.wtest("mixed", "hello\xe6\x9b\xbf\xe6\x9b\xbf", 9)
+
+    def test2(self):
+        util.set_encoding("euc-jp")
+        self.wtest("narrow", "hello", 5)
+        self.wtest("wide", "\xa1\xa1\xa1\xa1", 4)
+        self.wtest("invalid", "\xa1", 1)
+
+
+class ConvertDecSpecialTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.old_encoding = util.get_encoding()
+
+    def tearDown(self) -> None:
+        urwid.set_encoding(self.old_encoding)
+
+    def ctest(self, desc, s, exp, expcs):
+        exp = exp.encode("iso8859-1")
+        util.set_encoding("ascii")
+        c = urwid.Text(s).render((5,))
+        result = c._text[0]
+        assert result == exp, f"{desc} got:{result!r} expected:{exp!r}"
+        resultcs = c._cs[0]
+        assert resultcs == expcs, f"{desc} got:{resultcs!r} expected:{expcs!r}"
+
+    def test1(self):
+        self.ctest("no conversion", "hello", "hello", [(None, 5)])
+        self.ctest("only special", "£££££", "}}}}}", [("0", 5)])
+        self.ctest("mix left", "££abc", "}}abc", [("0", 2), (None, 3)])
+        self.ctest("mix right", "abc££", "abc}}", [(None, 3), ("0", 2)])
+        self.ctest("mix inner", "a££bc", "a}}bc", [(None, 1), ("0", 2), (None, 2)])
+        self.ctest("mix well", "£a£b£", "}a}b}", [("0", 1), (None, 1), ("0", 1), (None, 1), ("0", 1)])
+
+
+class AsciiFallbacksTest(unittest.TestCase):
+    """Tests for `urwid.set_ascii_fallbacks` and the encoding that uses the table."""
+
+    def setUp(self) -> None:
+        """Save the target encoding and the fallback table."""
+        self.old_encoding = util.get_encoding()
+        self.old_fallbacks = urwid.get_ascii_fallbacks()
+
+    def tearDown(self) -> None:
+        """Restore the fallback table and the target encoding."""
+        urwid.set_ascii_fallbacks(self.old_fallbacks)
+        urwid.set_encoding(self.old_encoding)
+
+    def render(self, encoding: str, text: str) -> tuple[bytes, list, list]:
+        """Return the encoded text, attribute runs and character set runs of *text* rendered under *encoding*."""
+        with util.set_temporary_encoding(encoding):
+            canvas = urwid.Text(text).render((len(text),))
+        return canvas._text[0], canvas._attr[0], canvas._cs[0]  # pylint: disable=protected-access
+
+    def test_validation(self) -> None:
+        """Accept one-column replacements and reject everything else."""
+        accepted = {"\N{BULLET}": "*", "\N{FULL BLOCK}": "\N{BOX DRAWINGS LIGHT VERTICAL}", "\xe9": "e"}
+        urwid.set_ascii_fallbacks(accepted)
+        fallbacks = urwid.get_ascii_fallbacks()
+        self.assertEqual(accepted, fallbacks)
+        with self.assertRaises(TypeError):
+            fallbacks["\N{BULLET}"] = "+"  # type: ignore[index]
+
+        rejected = (
+            ({"\N{BULLET}\N{BULLET}": "*"}, ValueError),
+            ({"\N{BULLET}": "**"}, ValueError),
+            ({"a": "*"}, ValueError),
+            ({"\u0301": "*"}, ValueError),
+            ({"\u754c": "*"}, ValueError),
+            ({"\ud800": "*"}, ValueError),
+            ({"\N{BULLET}": "\xe9"}, ValueError),
+            ({"": "*"}, ValueError),
+            ({"\N{BULLET}": ""}, ValueError),
+            ({1: "*"}, TypeError),
+            ({"\N{BULLET}": 1}, TypeError),
+        )
+        for mapping, exc_type in rejected:
+            with self.subTest(mapping=mapping), self.assertRaises(exc_type):
+                urwid.set_ascii_fallbacks(mapping)  # type: ignore[arg-type]
+
+    def test_failed_validation_keeps_table(self) -> None:
+        """Keep the previous table when one entry of a new table is rejected."""
+        urwid.set_ascii_fallbacks({"\N{BULLET}": "*"})
+        with self.assertRaises(ValueError):
+            urwid.set_ascii_fallbacks({"\N{CHECK MARK}": "+", "a": "*"})
+        self.assertEqual({"\N{BULLET}": "*"}, urwid.get_ascii_fallbacks())
+        self.assertEqual(b"a*b?", self.render("ascii", "a\N{BULLET}b\N{CHECK MARK}")[0])
+
+    def test_replace_and_clear(self) -> None:
+        """Replace the whole table on each call, and clear it with an empty mapping."""
+        urwid.set_ascii_fallbacks({"\N{BULLET}": "*"})
+        urwid.set_ascii_fallbacks({"\N{CHECK MARK}": "+"})
+        self.assertEqual(b"?+", self.render("ascii", "\N{BULLET}\N{CHECK MARK}")[0])
+        urwid.set_ascii_fallbacks({})
+        self.assertEqual({}, urwid.get_ascii_fallbacks())
+        self.assertEqual(b"??", self.render("ascii", "\N{BULLET}\N{CHECK MARK}")[0])
+
+    def test_copies(self) -> None:
+        """Copy the mapping passed in, and return a snapshot."""
+        mapping = {"\N{BULLET}": "*"}
+        urwid.set_ascii_fallbacks(mapping)
+        snapshot = urwid.get_ascii_fallbacks()
+        mapping["\N{BULLET}"] = "+"
+        mapping["\N{CHECK MARK}"] = "+"
+        self.assertEqual({"\N{BULLET}": "*"}, urwid.get_ascii_fallbacks())
+        self.assertEqual(b"*?", self.render("ascii", "\N{BULLET}\N{CHECK MARK}")[0])
+        urwid.set_ascii_fallbacks({"\N{CHECK MARK}": "+"})
+        self.assertEqual({"\N{BULLET}": "*"}, snapshot)
+
+    def test_used_only_for_rejected_characters(self) -> None:
+        """Use a fallback only for a character the target encoding cannot encode."""
+        urwid.set_ascii_fallbacks({"\N{BULLET}": "*", "\xe9": "e"})
+        self.assertEqual(b"a*b", self.render("ascii", "a\N{BULLET}b")[0])
+        self.assertEqual(b"e", self.render("ascii", "\xe9")[0])
+        self.assertEqual(b"\xe9", self.render("iso8859-1", "\xe9")[0])
+        self.assertEqual(b"?", self.render("ascii", "\N{CHECK MARK}")[0])
+
+    def test_dec_character_takes_precedence(self) -> None:
+        """Translate a DEC drawing character before the table is consulted."""
+        urwid.set_ascii_fallbacks({"\N{DEGREE SIGN}": "*"})
+        self.assertEqual((b"f", [("0", 1)]), self.render("ascii", "\N{DEGREE SIGN}")[::2])
+
+    def test_width_is_kept(self) -> None:
+        """Keep the row width and the layout of text that contains a replaced character."""
+        urwid.set_ascii_fallbacks({"\N{BULLET}": "*"})
+        text = "a\N{BULLET}b"
+        encoded, attr, cs = self.render("ascii", text)
+        self.assertEqual(b"a*b", encoded)
+        self.assertEqual(3, sum(run for _, run in attr))
+        self.assertEqual(3, sum(run for _, run in cs))
+        with util.set_temporary_encoding("utf-8"):
+            utf8_layout = urwid.Text(text * 3).get_line_translation(4)
+        with util.set_temporary_encoding("ascii"):
+            ascii_layout = urwid.Text(text * 3).get_line_translation(4)
+        self.assertEqual(utf8_layout, ascii_layout)
+
+    def test_utf8_ignores_table(self) -> None:
+        """Ignore the table under UTF-8, even for a character UTF-8 rejects."""
+        urwid.set_ascii_fallbacks({"\N{BULLET}": "*"})
+        self.assertEqual("\N{BULLET}".encode(), self.render("utf-8", "\N{BULLET}")[0])
+        util._ascii_fallback_table["\ud800"] = "*"  # pylint: disable=protected-access
+        try:
+            with util.set_temporary_encoding("utf-8"):
+                self.assertEqual(b"?", util.apply_target_encoding("\ud800")[0])
+        finally:
+            del util._ascii_fallback_table["\ud800"]  # pylint: disable=protected-access
+
+    def test_dec_character_value(self) -> None:
+        """Output a DEC drawing character value through the alternate character set."""
+        urwid.set_ascii_fallbacks({"\N{FULL BLOCK}": "\N{BOX DRAWINGS LIGHT VERTICAL}"})
+        self.assertEqual((b"x", [("0", 1)]), self.render("ascii", "\N{FULL BLOCK}")[::2])
+        self.assertEqual(
+            (b"xx", [("0", 2)]),
+            self.render("ascii", "\N{FULL BLOCK}\N{BOX DRAWINGS LIGHT VERTICAL}")[::2],
+        )
+
+    def test_byte_markup_uses_ascii_fallbacks_only(self) -> None:
+        """Use only printable ASCII fallbacks for a str element of byte text markup."""
+        urwid.set_ascii_fallbacks({"\N{BULLET}": "*", "\N{FULL BLOCK}": "\N{BOX DRAWINGS LIGHT VERTICAL}"})
+        with util.set_temporary_encoding("ascii"):
+            self.assertEqual(
+                (b"a*?", [(None, 2), ("x", 1)]),
+                urwid.decompose_tagmarkup([b"a", "\N{BULLET}", ("x", "\N{FULL BLOCK}")]),
+            )
+            self.assertEqual(b"a*?", urwid.Text([b"a", "\N{BULLET}\N{FULL BLOCK}"]).render((3,)).text[0])
+
+    def test_dec_charmap_update_still_works(self) -> None:
+        """Keep honouring entries added to `escape.DEC_SPECIAL_CHARMAP` in place."""
+        key = ord("\N{CHECK MARK}")
+        escape.DEC_SPECIAL_CHARMAP[key] = "*"
+        try:
+            self.assertEqual(b"*", self.render("ascii", "\N{CHECK MARK}")[0])
+        finally:
+            del escape.DEC_SPECIAL_CHARMAP[key]
+
+
+class WithinDoubleByteTest(unittest.TestCase):
+    def setUp(self):
+        self.old_encoding = util.get_encoding()
+        urwid.set_encoding("euc-jp")
+
+    def tearDown(self) -> None:
+        urwid.set_encoding(self.old_encoding)
+
+    def wtest(self, s, ls, pos, expected, desc):
+        result = str_util.within_double_byte(s.encode("iso8859-1"), ls, pos)
+        assert result == expected, f"{desc} got:{result!r} expected: {expected!r}"
+
+    def test1(self):
+        self.wtest("mnopqr", 0, 2, 0, "simple no high bytes")
+        self.wtest("mn\xa1\xa1qr", 0, 2, 1, "simple 1st half")
+        self.wtest("mn\xa1\xa1qr", 0, 3, 2, "simple 2nd half")
+        self.wtest("m\xa1\xa1\xa1\xa1r", 0, 3, 1, "subsequent 1st half")
+        self.wtest("m\xa1\xa1\xa1\xa1r", 0, 4, 2, "subsequent 2nd half")
+        self.wtest("mn\xa1@qr", 0, 3, 2, "simple 2nd half lo")
+        self.wtest("mn\xa1\xa1@r", 0, 4, 0, "subsequent not 2nd half lo")
+        self.wtest("m\xa1\xa1\xa1@r", 0, 4, 2, "subsequent 2nd half lo")
+
+    def test2(self):
+        self.wtest("\xa1\xa1qr", 0, 0, 1, "begin 1st half")
+        self.wtest("\xa1\xa1qr", 0, 1, 2, "begin 2nd half")
+        self.wtest("\xa1@qr", 0, 1, 2, "begin 2nd half lo")
+        self.wtest("\xa1\xa1\xa1\xa1r", 0, 2, 1, "begin subs. 1st half")
+        self.wtest("\xa1\xa1\xa1\xa1r", 0, 3, 2, "begin subs. 2nd half")
+        self.wtest("\xa1\xa1\xa1@r", 0, 3, 2, "begin subs. 2nd half lo")
+        self.wtest("\xa1@\xa1@r", 0, 3, 2, "begin subs. 2nd half lo lo")
+        self.wtest("@\xa1\xa1@r", 0, 3, 0, "begin subs. not 2nd half lo")
+
+    def test3(self):
+        self.wtest("abc \xa1\xa1qr", 4, 4, 1, "newline 1st half")
+        self.wtest("abc \xa1\xa1qr", 4, 5, 2, "newline 2nd half")
+        self.wtest("abc \xa1@qr", 4, 5, 2, "newline 2nd half lo")
+        self.wtest("abc \xa1\xa1\xa1\xa1r", 4, 6, 1, "newl subs. 1st half")
+        self.wtest("abc \xa1\xa1\xa1\xa1r", 4, 7, 2, "newl subs. 2nd half")
+        self.wtest("abc \xa1\xa1\xa1@r", 4, 7, 2, "newl subs. 2nd half lo")
+        self.wtest("abc \xa1@\xa1@r", 4, 7, 2, "newl subs. 2nd half lo lo")
+        self.wtest("abc @\xa1\xa1@r", 4, 7, 0, "newl subs. not 2nd half lo")
+
+
+class CalcTextPosTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.old_encoding = util.get_encoding()
+
+    def tearDown(self) -> None:
+        urwid.set_encoding(self.old_encoding)
+
+    def ctptest(self, text, tests):
+        text = text.encode("iso8859-1")
+        for s, e, p, expected in tests:
+            got = str_util.calc_text_pos(text, s, e, p)
+            assert got == expected, f"{s, e, p!r} got:{got!r} expected:{expected!r}"
+
+    def test1(self):
+        text = "hello world out there"
+        tests = [
+            (0, 21, 0, (0, 0)),
+            (0, 21, 5, (5, 5)),
+            (0, 21, 21, (21, 21)),
+            (0, 21, 50, (21, 21)),
+            (2, 15, 50, (15, 13)),
+            (6, 21, 0, (6, 0)),
+            (6, 21, 3, (9, 3)),
+        ]
+        self.ctptest(text, tests)
+
+    def test2_wide(self):
+        util.set_encoding("euc-jp")
+        text = "hel\xa1\xa1 world out there"
+        tests = [
+            (0, 21, 0, (0, 0)),
+            (0, 21, 4, (3, 3)),
+            (2, 21, 2, (3, 1)),
+            (2, 21, 3, (5, 3)),
+            (6, 21, 0, (6, 0)),
+        ]
+        self.ctptest(text, tests)
+
+    def test3_utf8(self):
+        util.set_encoding("utf-8")
+        text = "hel\xc4\x83 world \xe2\x81\x81 there"
+        tests = [
+            (0, 21, 0, (0, 0)),
+            (0, 21, 4, (5, 4)),
+            (2, 21, 1, (3, 1)),
+            (2, 21, 2, (5, 2)),
+            (2, 21, 3, (6, 3)),
+            (6, 21, 7, (15, 7)),
+            (6, 21, 8, (16, 8)),
+        ]
+        self.ctptest(text, tests)
+
+    def test4_utf8(self):
+        util.set_encoding("utf-8")
+        text = "he\xcc\x80llo \xe6\x9b\xbf world"
+        tests = [
+            (0, 15, 0, (0, 0)),
+            (0, 15, 1, (1, 1)),
+            (0, 15, 2, (4, 2)),
+            (0, 15, 4, (6, 4)),
+            (8, 15, 0, (8, 0)),
+            (8, 15, 1, (8, 0)),
+            (8, 15, 2, (11, 2)),
+            (8, 15, 5, (14, 5)),
+        ]
+        self.ctptest(text, tests)
+
+
+class TagMarkupTest(unittest.TestCase):
+    mytests = [
+        ("simple one", "simple one", []),
+        (("blue", "john"), "john", [("blue", 4)]),
+        (["a ", "litt", "le list"], "a little list", []),
+        (
+            ["mix", [" it", ("high", [" up", ("ital", " a")])], " little"],
+            "mix it up a little",
+            [(None, 6), ("high", 3), (urwid.LayeredAttr("ital", "high"), 2)],
+        ),
+        (
+            ("red_fg", ["a", ("blue_bg", "b"), "c"]),
+            "abc",
+            [("red_fg", 1), (urwid.LayeredAttr("blue_bg", "red_fg"), 1), ("red_fg", 1)],
+        ),
+        ((None, ["a", ("x", ("x", "b")), (None, "c")]), "abc", [(None, 1), ("x", 1)]),
+        (["££", "x££"], "££x££", []),
+        ([b"\xc2\x80", b"\xc2\x80"], b"\xc2\x80\xc2\x80", []),
+    ]
+
+    def test(self):
+        for input, text, attr in self.mytests:
+            restext, resattr = urwid.decompose_tagmarkup(input)
+            assert restext == text, f"got: {restext!r} expected: {text!r}"
+            assert resattr == attr, f"got: {resattr!r} expected: {attr!r}"
+
+    def test_layered_attr_is_flattened(self):
+        for label, built, expected in (
+            (
+                "constructor drops None and repeats",
+                urwid.LayeredAttr(urwid.LayeredAttr("a", "b"), None, "b", "c"),
+                urwid.LayeredAttr("a", "b", "c"),
+            ),
+            ("layer()", urwid.LayeredAttr.layer("a", urwid.LayeredAttr("b", "c")), urwid.LayeredAttr("a", "b", "c")),
+            ("layer() of one attribute", urwid.LayeredAttr.layer("a", "a"), "a"),
+        ):
+            with self.subTest(label):
+                self.assertEqual(expected, built)
+
+    def test_bad_tuple(self):
+        self.assertRaises(urwid.TagMarkupException, lambda: urwid.decompose_tagmarkup((1, 2, 3)))
+
+    def test_mixed_text_types_count_converted_lengths(self):
+        """Attribute runs count the characters of the joined text, whatever type each element had."""
+        with util.set_temporary_encoding("utf-8"):
+            self.assertEqual(
+                ("a\u00e9b", [(None, 2), ("x", 1)]), urwid.decompose_tagmarkup(["a", b"\xc3\xa9", ("x", "b")])
+            )
+            self.assertEqual(
+                (b"a\xc3\xa9b", [(None, 3), ("x", 1)]),
+                urwid.decompose_tagmarkup([b"a", "\u00e9", ("x", b"b")]),
+            )
+            self.assertEqual(
+                ("\u00e9z", [("a", 0), ("b", 1), (None, 0), ("c", 1)]),
+                urwid.decompose_tagmarkup([("a", ""), ("b", b"\xc3\xa9"), "", ("c", "z")]),
+            )
+
+    def test_mixed_text_types_replace_unconvertible(self):
+        """An element the target encoding cannot convert is replaced instead of raising."""
+        with util.set_temporary_encoding("utf-8"):
+            self.assertEqual(("name: \ufffd\ufffd", []), urwid.decompose_tagmarkup(["name: ", b"\xff\xfe"]))
+        with util.set_temporary_encoding("ascii"):
+            self.assertEqual((b"raw:?", []), urwid.decompose_tagmarkup([b"raw:", "\u20ac"]))
+
+    def test_bad_type(self):
+        self.assertRaises(urwid.TagMarkupException, lambda: urwid.decompose_tagmarkup(5))
+
+
+class RleTest(unittest.TestCase):
+    def test_rle_prepend(self):
+        rle0 = [("A", 10), ("B", 15)]
+        # the rle functions are mutating, so make a few copies of rle0
+        rle1, rle2 = rle0[:], rle0[:]
+        util.rle_prepend_modify(rle1, ("A", 3))
+        util.rle_prepend_modify(rle2, ("X", 2))
+        self.assertListEqual(rle1, [("A", 13), ("B", 15)])
+        self.assertListEqual(rle2, [("X", 2), ("A", 10), ("B", 15)])
+
+    def test_rle_append(self):
+        rle0 = [("A", 10), ("B", 15)]
+        rle3, rle4 = rle0[:], rle0[:]
+        util.rle_append_modify(rle3, ("B", 5))
+        util.rle_append_modify(rle4, ("K", 1))
+        self.assertListEqual(rle3, [("A", 10), ("B", 20)])
+        self.assertListEqual(rle4, [("A", 10), ("B", 15), ("K", 1)])
+
+    def test_rle_prepend_empty(self):
+        rle = []
+        util.rle_prepend_modify(rle, ("A", 3))
+        self.assertListEqual(rle, [("A", 3)])
+
+    def test_rle_append_empty(self):
+        rle = []
+        util.rle_append_modify(rle, ("A", 3))
+        self.assertListEqual(rle, [("A", 3)])
+
+    def test_rle_get_at(self):
+        rle = [("A", 10), ("B", 15)]
+        self.assertEqual("A", util.rle_get_at(rle, 0))
+        self.assertEqual("A", util.rle_get_at(rle, 9))
+        self.assertEqual("B", util.rle_get_at(rle, 10))
+        self.assertEqual("B", util.rle_get_at(rle, 24))
+        self.assertIsNone(util.rle_get_at(rle, 25))
+        self.assertIsNone(util.rle_get_at(rle, -1))
+
+    def test_rle_subseg(self):
+        rle = [("A", 10), ("B", 15)]
+        self.assertListEqual([("A", 10), ("B", 15)], util.rle_subseg(rle, 0, 25))
+        self.assertListEqual([("A", 5)], util.rle_subseg(rle, 0, 5))
+        self.assertListEqual([("A", 5), ("B", 5)], util.rle_subseg(rle, 5, 15))
+        self.assertListEqual([("B", 5)], util.rle_subseg(rle, 20, 30))
+        self.assertListEqual([], util.rle_subseg(rle, 25, 30))
+        self.assertListEqual([], util.rle_subseg(rle, 5, 5))
+
+    def test_rle_len(self):
+        self.assertEqual(0, util.rle_len([]))
+        self.assertEqual(25, util.rle_len([("A", 10), ("B", 15)]))
+        self.assertRaises(TypeError, util.rle_len, [("A", 10), "not a tuple"])
+
+    def test_rle_join_modify(self):
+        rle = [("A", 10), ("B", 15)]
+        util.rle_join_modify(rle, [])
+        self.assertListEqual(rle, [("A", 10), ("B", 15)])
+
+        util.rle_join_modify(rle, [("B", 5), ("C", 1)])
+        self.assertListEqual(rle, [("A", 10), ("B", 20), ("C", 1)])
+
+        util.rle_join_modify(rle, [("D", 2)])
+        self.assertListEqual(rle, [("A", 10), ("B", 20), ("C", 1), ("D", 2)])
+
+    def test_rle_product(self):
+        rle1 = [("a", 10), ("b", 5)]
+        rle2 = [("Q", 5), ("P", 10)]
+        self.assertListEqual(
+            [(("a", "Q"), 5), (("a", "P"), 5), (("b", "P"), 5)],
+            util.rle_product(rle1, rle2),
+        )
+        self.assertListEqual([], util.rle_product([], rle2))
+        self.assertListEqual([], util.rle_product(rle1, []))
+
+    def test_rle_product_skips_zero_length_runs(self):
+        rle1 = [("a", 0), ("b", 5)]
+        rle2 = [("Q", 0), ("P", 5)]
+        self.assertListEqual([(("b", "P"), 5)], util.rle_product(rle1, rle2))
+
+    def test_trim_text_attr_cs(self):
+        old_encoding = util.get_encoding()
+        try:
+            util.set_encoding("euc-jp")
+            text = b"hel\xa1\xa1lo"
+            attr = [("A", 7)]
+            cs = [(None, 7)]
+
+            self.assertEqual(
+                (b"hel\xa1\xa1lo", [("A", 7)], [(None, 7)]),
+                util.trim_text_attr_cs(text, attr, cs, 0, 7),
+            )
+            self.assertEqual((b"hel ", [("A", 4)], [(None, 4)]), util.trim_text_attr_cs(text, attr, cs, 0, 4))
+            self.assertEqual((b" lo", [("A", 3)], [(None, 3)]), util.trim_text_attr_cs(text, attr, cs, 4, 7))
+        finally:
+            urwid.set_encoding(old_encoding)
+
+
+class PortabilityTest(unittest.TestCase):
+    def test_locale(self):
+        initial = locale.getlocale()
+
+        locale.setlocale(locale.LC_ALL, (None, None))
+        util.detect_encoding()
+        self.assertEqual(locale.getlocale(), (None, None))
+
+        try:
+            locale.setlocale(locale.LC_ALL, ("en_US", "UTF-8"))
+        except locale.Error as exc:
+            if "unsupported locale setting" not in str(exc):
+                raise
+
+            print(
+                f"Locale change impossible, probably locale not supported by system (libc ignores this error).\n"
+                f"{exc}"
+            )
+            return
+
+        util.detect_encoding()
+        self.assertEqual(locale.getlocale(), ("en_US", "UTF-8"))
+
+        try:
+            locale.setlocale(locale.LC_ALL, initial)
+        except locale.Error as exc:
+            if "unsupported locale setting" not in str(exc):
+                raise
+
+            print(
+                f"Locale restore impossible, probably locale not supported by system (libc ignores this error).\n"
+                f"{exc}"
+            )

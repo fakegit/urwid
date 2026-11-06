@@ -1,5 +1,3 @@
-#!/usr/bin/python
-#
 # Urwid split_repr helper functions
 #    Copyright (C) 2004-2011  Ian Ward
 #
@@ -17,104 +15,102 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
-from __future__ import division, print_function
 
-from urwid.compat import PYTHON3, bytes
-if not PYTHON3:
-    from inspect import getargspec
-else:
-    from inspect import getfullargspec
+"""Helpers for building a readable ``repr`` of widgets."""
 
-def split_repr(self):
-    """
-    Return a helpful description of the object using
-    self._repr_words() and self._repr_attrs() to add
-    to the description.  This function may be used by
-    adding code to your class like this:
+from __future__ import annotations
+
+import inspect
+import sys
+import typing
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from urwid.widget import Widget
+
+
+def split_repr(self: Widget) -> str:
+    """Return a helpful description of the object using self._repr_words() and self._repr_attrs().
+
+    This function may be used by adding code to your class like this:
 
     >>> class Foo(object):
     ...     __repr__ = split_repr
+    ...
     ...     def _repr_words(self):
     ...         return ["words", "here"]
+    ...
     ...     def _repr_attrs(self):
-    ...         return {'attrs': "appear too"}
+    ...         return {"attrs": "appear too"}
     >>> Foo()
     <Foo words here attrs='appear too'>
     >>> class Bar(Foo):
     ...     def _repr_words(self):
     ...         return Foo._repr_words(self) + ["too"]
+    ...
     ...     def _repr_attrs(self):
     ...         return dict(Foo._repr_attrs(self), barttr=42)
     >>> Bar()
     <Bar words here too attrs='appear too' barttr=42>
     """
-    alist = [(str(k), normalize_repr(v))
-        for k, v in self._repr_attrs().items()]
-    alist.sort()
+    alist = sorted((k, normalize_repr(v)) for k, v in self._repr_attrs().items())
+
     words = self._repr_words()
     if not words and not alist:
         # if we're just going to print the classname fall back
-        # to the previous __repr__ implementation instead
-        return super(self.__class__, self).__repr__()
-    if words and alist: words.append("")
-    return "<%s %s>" % (self.__class__.__name__,
-        " ".join(words) +
-        " ".join(["%s=%s" % itm for itm in alist]))
+        # to the __repr__ implementation that split_repr replaced
+        mro = type(self).__mro__
+        for idx, cls in enumerate(mro):
+            if vars(cls).get("__repr__") is split_repr:
+                # skip further split_repr levels; object is last in every MRO and defines __repr__
+                replaced: Callable[[object], str] = next(
+                    vars(base)["__repr__"]
+                    for base in mro[idx + 1 :]
+                    if vars(base).get("__repr__", split_repr) is not split_repr
+                )
+                return replaced(self)
+        return object.__repr__(self)
+    if words and alist:
+        words.append("")
+    return f"<{self.__class__.__name__} {' '.join(words) + ' '.join([f'{k}={v}' for k, v in alist])}>"
 
-def normalize_repr(v):
+
+def normalize_repr(v: object) -> str:
     """
-    Return dictionary repr sorted by keys, leave others unchanged
+    Return dictionary repr sorted by keys, leave others unchanged.
 
-    >>> normalize_repr({1:2,3:4,5:6,7:8})
+    >>> normalize_repr({1: 2, 3: 4, 5: 6, 7: 8})
     '{1: 2, 3: 4, 5: 6, 7: 8}'
-    >>> normalize_repr('foo')
+    >>> normalize_repr("foo")
     "'foo'"
     """
     if isinstance(v, dict):
-        items = [(repr(k), repr(v)) for k, v in v.items()]
-        items.sort()
-        return "{" + ", ".join([
-            "%s: %s" % itm for itm in items]) + "}"
+        items = sorted((repr(k), repr(v)) for k, v in v.items())
+
+        return f"{{{', '.join(f'{k}: {v}' for k, v in items)}}}"
 
     return repr(v)
 
-def python3_repr(v):
-    """
-    Return strings and byte strings as they appear in Python 3
 
-    >>> python3_repr(u"text")
-    "'text'"
-    >>> python3_repr(bytes())
-    "b''"
-    """
-    r = repr(v)
-    if not PYTHON3:
-        if isinstance(v, bytes):
-            return 'b' + r
-        if r.startswith('u'):
-            return r[1:]
-    return r
+def remove_defaults(d: dict[str, object], fn: Callable[..., object]) -> dict[str, object]:
+    """Remove keys in d that are set to the default values from fn.
 
-
-
-def remove_defaults(d, fn):
-    """
-    Remove keys in d that are set to the default values from
-    fn.  This method is used to unclutter the _repr_attrs()
-    return value.
+    This method is used to unclutter the _repr_attrs() return value.
 
     d will be modified by this function.
-
-    Returns d.
 
     >>> class Foo(object):
     ...     def __init__(self, a=1, b=2):
     ...         self.values = a, b
+    ...
     ...     __repr__ = split_repr
+    ...
     ...     def _repr_words(self):
     ...         return ["object"]
+    ...
     ...     def _repr_attrs(self):
     ...         d = dict(a=self.values[0], b=self.values[1])
     ...         return remove_defaults(d, Foo.__init__)
@@ -124,34 +120,35 @@ def remove_defaults(d, fn):
     <Foo object a=10>
     >>> Foo()
     <Foo object>
+
+    :returns: d.
+    :raises TypeError: *fn* is not callable. No signature can be read from *fn*.
     """
-    if not PYTHON3:
-        args, varargs, varkw, defaults = getargspec(fn)
-    else:
-        args, varargs, varkw, defaults, _, _, _ = getfullargspec(fn)
+    try:
+        if sys.version_info >= (3, 14):
+            import annotationlib
 
-    # ignore *varargs and **kwargs
-    if varkw:
-        del args[-1]
-    if varargs:
-        del args[-1]
-
-    # create a dictionary of args with default values
-    ddict = dict(list(zip(args[len(args) - len(defaults):], defaults)))
+            # Only the defaults are read: an annotation naming a type-checking-only import must not raise NameError.
+            parameters = inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF).parameters
+        else:
+            parameters = inspect.signature(fn).parameters
+    except ValueError as exc:
+        raise TypeError(f"no signature to read defaults from: {fn!r}") from exc
+    ddict = {name: param.default for name, param in parameters.items() if param.default is not inspect.Parameter.empty}
 
     for k in list(d.keys()):
-        if k in ddict:
+        if k in ddict and ddict[k] == d[k]:
             # remove values that match their defaults
-            if ddict[k] == d[k]:
-                del d[k]
+            del d[k]
 
     return d
 
 
-
-def _test():
+def _test() -> None:
     import doctest
+
     doctest.testmod()
 
-if __name__=='__main__':
+
+if __name__ == "__main__":
     _test()

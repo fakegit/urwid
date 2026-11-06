@@ -1,33 +1,55 @@
 #!/usr/bin/env python
 
-import subprocess
-import urwid
+"""Example: monitor and display the output of a subprocess while accepting input."""
+
+from __future__ import annotations
+
 import os
+import subprocess
 import sys
+import typing
+
+import urwid
 
 factor_me = 362923067964327863989661926737477737673859044111968554257667
-run_me = os.path.join(os.path.dirname(sys.argv[0]), 'subproc2.py')
+run_me = os.path.join(os.path.dirname(sys.argv[0]), "subproc2.py")
 
-output_widget = urwid.Text("Factors of %d:\n" % factor_me)
+output_widget = urwid.Text(f"Factors of {factor_me:d}:\n")
 edit_widget = urwid.Edit("Type anything or press enter to exit:")
-frame_widget = urwid.Frame(
+frame_widget = urwid.Frame[urwid.Filler[urwid.Text], urwid.Edit, None](
     header=edit_widget,
-    body=urwid.Filler(output_widget, valign='bottom'),
-    focus_part='header')
+    body=urwid.Filler(output_widget, valign=urwid.BOTTOM),
+    focus_part="header",
+)
 
-def exit_on_enter(key):
-    if key == 'enter': raise urwid.ExitMainLoop()
+
+def exit_on_enter(key: str | tuple[str, int, int, int]) -> None:
+    """Handle keys not consumed by the widgets: :kbd:`enter` to exit.
+
+    :param key: unhandled key or mouse event
+    :raises urwid.ExitMainLoop: when the user presses :kbd:`enter`
+    """
+    if key == "enter":
+        raise urwid.ExitMainLoop
+
 
 loop = urwid.MainLoop(frame_widget, unhandled_input=exit_on_enter)
 
-def received_output(data):
-    output_widget.set_text(output_widget.text + data.decode('utf8'))
+
+def received_output(data: bytes) -> bool:
+    """Append data received from the subprocess to the output widget.
+
+    :param data: bytes read from the subprocess's standard output
+    :returns: ``True`` to keep the pipe watch registered
+    """
+    output_widget.set_text(typing.cast("str", output_widget.text) + data.decode("utf8"))
+    return True
+
 
 write_fd = loop.watch_pipe(received_output)
-proc = subprocess.Popen(
-    ['python', '-u', run_me, str(factor_me)],
+with subprocess.Popen(  # noqa: S603
+    ["python", "-u", run_me, str(factor_me)],  # noqa: S607  # Example can be insecure
     stdout=write_fd,
-    close_fds=True)
-
-loop.run()
-proc.kill()
+    close_fds=True,
+) as proc:
+    loop.run()

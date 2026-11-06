@@ -1,5 +1,3 @@
-#!/usr/bin/python
-#
 # Urwid __init__.py - all the stuff you're likely to care about
 #
 #    Copyright (C) 2004-2012  Ian Ward
@@ -18,67 +16,625 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
-from __future__ import division, print_function
 
-from urwid.version import VERSION, __version__
-from urwid.widget import (FLOW, BOX, FIXED, LEFT, RIGHT, CENTER, TOP, MIDDLE,
-    BOTTOM, SPACE, ANY, CLIP, PACK, GIVEN, RELATIVE, RELATIVE_100, WEIGHT,
+"""Urwid, a console user interface library: the public API re-exported from its submodules."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+import typing
+
+from urwid import _deprecation
+from urwid.canvas import (
+    BlankCanvas,
+    Canvas,
+    CanvasCache,
+    CanvasCombine,
+    CanvasError,
+    CanvasJoin,
+    CanvasOverlay,
+    CompositeCanvas,
+    SolidCanvas,
+    TextCanvas,
+)
+from urwid.command_map import (
+    ACTIVATE,
+    CURSOR_DOWN,
+    CURSOR_LEFT,
+    CURSOR_MAX_LEFT,
+    CURSOR_MAX_RIGHT,
+    CURSOR_PAGE_DOWN,
+    CURSOR_PAGE_UP,
+    CURSOR_RIGHT,
+    CURSOR_UP,
+    REDRAW_SCREEN,
+    CommandMap,
+    command_map,
+)
+from urwid.font import (
+    Font,
+    FontRegistry,
+    HalfBlock5x4Font,
+    HalfBlock6x5Font,
+    HalfBlock7x7Font,
+    HalfBlockHeavy6x5Font,
+    Sextant2x2Font,
+    Sextant3x3Font,
+    Thin3x3Font,
+    Thin4x3Font,
+    Thin5x4Font,
+    Thin6x6Font,
+    get_all_fonts,
+)
+from urwid.signals import (
+    MetaSignals,
+    Signals,
+    connect_signal,
+    disconnect_signal,
+    disconnect_signal_by_key,
+    emit_signal,
+    register_signal,
+)
+from urwid.str_util import calc_text_pos, calc_width, is_wide_char, move_next_char, move_prev_char, within_double_byte
+from urwid.text_layout import LayoutSegment, StandardTextLayout, TextLayout, default_layout
+from urwid.util import (
+    LayeredAttr,
+    MetaSuper,
+    TagMarkupException,
+    apply_target_encoding,
+    calc_trim_text,
+    decompose_tagmarkup,
+    detected_encoding,
+    get_ascii_fallbacks,
+    get_encoding_mode,
+    int_scale,
+    is_mouse_event,
+    set_ascii_fallbacks,
+    set_encoding,
+    supports_unicode,
+)
+from urwid.version import version as __version__
+from urwid.version import version_tuple as __version_tuple__
+
+from . import display, event_loop, widget
+from .display import (
+    BLACK,
+    BROWN,
+    DARK_BLUE,
+    DARK_CYAN,
+    DARK_GRAY,
+    DARK_GREEN,
+    DARK_MAGENTA,
+    DARK_RED,
+    DEFAULT,
+    INHERIT,
+    LIGHT_BLUE,
+    LIGHT_CYAN,
+    LIGHT_GRAY,
+    LIGHT_GREEN,
+    LIGHT_MAGENTA,
+    LIGHT_RED,
+    NO_HYPERLINK,
+    UPDATE_PALETTE_ENTRY,
+    WHITE,
+    YELLOW,
+    AttrSpec,
+    AttrSpecError,
+    BaseScreen,
+    Hyperlink,
+    InputClosedError,
+    RealTerminal,
+    ScreenError,
+)
+from .event_loop import (
+    AsyncioEventLoop,
+    EventLoop,
+    ExitMainLoop,
+    GuardedEventLoop,
+    MainLoop,
+    SelectEventLoop,
+    get_running_loop,
+    get_running_loop_or_none,
+)
+from .widget import (
+    ANY,
+    BOTTOM,
+    BOX,
+    CENTER,
+    CLIP,
+    ELLIPSIS,
+    FIXED,
+    FLOW,
+    GIVEN,
+    LEFT,
+    MIDDLE,
+    PACK,
+    RELATIVE,
+    RELATIVE_100,
+    RIGHT,
+    SPACE,
+    TOP,
+    WEIGHT,
+    AbstractWidget,
+    Align,
+    ANSIText,
+    AttrMap,
+    AttrMapError,
+    AttrWrap,
+    BarGraph,
+    BarGraphError,
+    BarGraphMeta,
+    BigText,
+    BoxAdapter,
+    BoxAdapterError,
+    Button,
+    CheckBox,
+    CheckBoxError,
+    Columns,
+    ColumnsError,
+    Divider,
+    DropDown,
+    Edit,
+    EditError,
+    Filler,
+    FillerError,
+    FilteredListWalker,
+    Frame,
+    FrameError,
+    GraphVScale,
+    GridFlow,
+    GridFlowError,
+    IntEdit,
+    LineBox,
+    ListBox,
+    ListBoxError,
+    ListWalker,
+    ListWalkerError,
+    MonitoredDeque,
+    MonitoredFocusDeque,
+    MonitoredFocusList,
+    MonitoredList,
+    MouseButton,
+    Notification,
+    Notifications,
+    Overlay,
+    OverlayError,
+    OverlayStack,
+    Padding,
+    PaddingError,
+    ParentNode,
+    Pile,
+    PileError,
+    PopUpLauncher,
+    PopUpTarget,
+    ProgressBar,
+    RadioButton,
+    Scrollable,
+    ScrollBar,
+    SelectableIcon,
+    SelectNavigationListContentsMixin,
+    SelectNavigationMixin,
+    Severity,
+    SimpleDequeWalker,
+    SimpleFocusDequeWalker,
+    SimpleFocusListWalker,
+    SimpleListWalker,
+    Sizing,
+    SolidFill,
+    Spinner,
+    Table,
+    TableColumn,
+    TableError,
+    TableRow,
+    Tabs,
+    TabsError,
+    Text,
+    TextError,
+    TreeListBox,
+    TreeNode,
+    TreeWalker,
+    TreeWidget,
+    TreeWidgetError,
+    ValidationMessage,
+    VAlign,
+    WHSettings,
+    Widget,
+    WidgetContainerMixin,
+    WidgetDecoration,
+    WidgetDisable,
+    WidgetError,
     WidgetMeta,
-    WidgetError, Widget, FlowWidget, BoxWidget, fixed_size, FixedWidget,
-    Divider, SolidFill, TextError, Text, EditError, Edit, IntEdit,
-    delegate_to_widget_mixin, WidgetWrapError, WidgetWrap)
-from urwid.decoration import (WidgetDecoration, WidgetPlaceholder,
-    AttrMapError, AttrMap, AttrWrap, BoxAdapterError, BoxAdapter, PaddingError,
-    Padding, FillerError, Filler, WidgetDisable)
-from urwid.container import (GridFlowError, GridFlow, OverlayError, Overlay,
-    FrameError, Frame, PileError, Pile, ColumnsError, Columns,
-    WidgetContainerMixin)
-from urwid.wimp import (SelectableIcon, CheckBoxError, CheckBox, RadioButton,
-    Button, PopUpLauncher, PopUpTarget)
-from urwid.listbox import (ListWalkerError, ListWalker, SimpleListWalker,
-    SimpleFocusListWalker, ListBoxError, ListBox)
-from urwid.graphics import (BigText, LineBox, BarGraphMeta, BarGraphError,
-    BarGraph, GraphVScale, ProgressBar, scale_bar_values)
-from urwid.canvas import (CanvasCache, CanvasError, Canvas, TextCanvas,
-    BlankCanvas, SolidCanvas, CompositeCanvas, CanvasCombine, CanvasOverlay,
-    CanvasJoin)
-from urwid.font import (get_all_fonts, Font, Thin3x3Font, Thin4x3Font,
-    HalfBlock5x4Font, HalfBlock6x5Font, HalfBlockHeavy6x5Font, Thin6x6Font,
-    HalfBlock7x7Font)
-from urwid.signals import (MetaSignals, Signals, emit_signal, register_signal,
-    connect_signal, disconnect_signal)
-from urwid.monitored_list import MonitoredList, MonitoredFocusList
-from urwid.command_map import (CommandMap, command_map,
-    REDRAW_SCREEN, CURSOR_UP, CURSOR_DOWN, CURSOR_LEFT, CURSOR_RIGHT,
-    CURSOR_PAGE_UP, CURSOR_PAGE_DOWN, CURSOR_MAX_LEFT, CURSOR_MAX_RIGHT,
-    ACTIVATE)
-from urwid.main_loop import (ExitMainLoop, MainLoop, SelectEventLoop,
-    GLibEventLoop, TornadoEventLoop, AsyncioEventLoop)
-try:
-    from urwid.main_loop import TwistedEventLoop
-except ImportError:
-    pass
-try:
-    from urwid.main_loop import TrioEventLoop
-except ImportError:
-    pass
-from urwid.text_layout import (TextLayout, StandardTextLayout, default_layout,
-    LayoutSegment)
-from urwid.display_common import (UPDATE_PALETTE_ENTRY, DEFAULT, BLACK,
-    DARK_RED, DARK_GREEN, BROWN, DARK_BLUE, DARK_MAGENTA, DARK_CYAN,
-    LIGHT_GRAY, DARK_GRAY, LIGHT_RED, LIGHT_GREEN, YELLOW, LIGHT_BLUE,
-    LIGHT_MAGENTA, LIGHT_CYAN, WHITE, AttrSpecError, AttrSpec, RealTerminal,
-    ScreenError, BaseScreen)
-from urwid.util import (calc_text_pos, calc_width, is_wide_char,
-    move_next_char, move_prev_char, within_double_byte, detected_encoding,
-    set_encoding, get_encoding_mode, apply_target_encoding, supports_unicode,
-    calc_trim_text, TagMarkupException, decompose_tagmarkup, MetaSuper,
-    int_scale, is_mouse_event)
-from urwid.treetools import (TreeWidgetError, TreeWidget, TreeNode,
-    ParentNode, TreeWalker, TreeListBox)
-from urwid.vterm import (TermModes, TermCharset, TermScroller, TermCanvas,
-    Terminal)
+    WidgetPlaceholder,
+    WidgetWrap,
+    WidgetWrapError,
+    WrapMode,
+    delegate_to_widget_mixin,
+    fixed_size,
+    scale_bar_values,
+)
 
-from urwid import raw_display
+__all__: tuple[str, ...] = (
+    "ACTIVATE",
+    "ANY",
+    "BLACK",
+    "BOTTOM",
+    "BOX",
+    "BROWN",
+    "CENTER",
+    "CLIP",
+    "CURSOR_DOWN",
+    "CURSOR_LEFT",
+    "CURSOR_MAX_LEFT",
+    "CURSOR_MAX_RIGHT",
+    "CURSOR_PAGE_DOWN",
+    "CURSOR_PAGE_UP",
+    "CURSOR_RIGHT",
+    "CURSOR_UP",
+    "DARK_BLUE",
+    "DARK_CYAN",
+    "DARK_GRAY",
+    "DARK_GREEN",
+    "DARK_MAGENTA",
+    "DARK_RED",
+    "DEFAULT",
+    "ELLIPSIS",
+    "FIXED",
+    "FLOW",
+    "GIVEN",
+    "INHERIT",
+    "LEFT",
+    "LIGHT_BLUE",
+    "LIGHT_CYAN",
+    "LIGHT_GRAY",
+    "LIGHT_GREEN",
+    "LIGHT_MAGENTA",
+    "LIGHT_RED",
+    "MIDDLE",
+    "NO_HYPERLINK",
+    "PACK",
+    "REDRAW_SCREEN",
+    "RELATIVE",
+    "RELATIVE_100",
+    "RIGHT",
+    "SPACE",
+    "TOP",
+    "UPDATE_PALETTE_ENTRY",
+    "WEIGHT",
+    "WHITE",
+    "YELLOW",
+    "ANSIText",
+    "AbstractWidget",
+    "Align",
+    "AsyncioEventLoop",
+    "AttrMap",
+    "AttrMapError",
+    "AttrSpec",
+    "AttrSpecError",
+    "AttrWrap",
+    "BarGraph",
+    "BarGraphError",
+    "BarGraphMeta",
+    "BaseScreen",
+    "BigText",
+    "BlankCanvas",
+    "BoxAdapter",
+    "BoxAdapterError",
+    "Button",
+    "Canvas",
+    "CanvasCache",
+    "CanvasCombine",
+    "CanvasError",
+    "CanvasJoin",
+    "CanvasOverlay",
+    "CheckBox",
+    "CheckBoxError",
+    "Columns",
+    "ColumnsError",
+    "CommandMap",
+    "CompositeCanvas",
+    "Divider",
+    "DropDown",
+    "Edit",
+    "EditError",
+    "EventLoop",
+    "ExitMainLoop",
+    "Filler",
+    "FillerError",
+    "FilteredListWalker",
+    "Font",
+    "FontRegistry",
+    "Frame",
+    "FrameError",
+    "GraphVScale",
+    "GridFlow",
+    "GridFlowError",
+    "GuardedEventLoop",
+    "HalfBlock5x4Font",
+    "HalfBlock6x5Font",
+    "HalfBlock7x7Font",
+    "HalfBlockHeavy6x5Font",
+    "Hyperlink",
+    "InputClosedError",
+    "IntEdit",
+    "LayeredAttr",
+    "LayoutSegment",
+    "LineBox",
+    "ListBox",
+    "ListBoxError",
+    "ListWalker",
+    "ListWalkerError",
+    "MainLoop",
+    "MetaSignals",
+    "MetaSuper",
+    "MonitoredDeque",
+    "MonitoredFocusDeque",
+    "MonitoredFocusList",
+    "MonitoredList",
+    "MouseButton",
+    "Notification",
+    "Notifications",
+    "Overlay",
+    "OverlayError",
+    "OverlayStack",
+    "Padding",
+    "PaddingError",
+    "ParentNode",
+    "Pile",
+    "PileError",
+    "PopUpLauncher",
+    "PopUpTarget",
+    "ProgressBar",
+    "RadioButton",
+    "RealTerminal",
+    "ScreenError",
+    "ScrollBar",
+    "Scrollable",
+    "SelectEventLoop",
+    "SelectNavigationListContentsMixin",
+    "SelectNavigationMixin",
+    "SelectableIcon",
+    "Severity",
+    "Sextant2x2Font",
+    "Sextant3x3Font",
+    "Signals",
+    "SimpleDequeWalker",
+    "SimpleFocusDequeWalker",
+    "SimpleFocusListWalker",
+    "SimpleListWalker",
+    "Sizing",
+    "SolidCanvas",
+    "SolidFill",
+    "Spinner",
+    "StandardTextLayout",
+    "Table",
+    "TableColumn",
+    "TableError",
+    "TableRow",
+    "Tabs",
+    "TabsError",
+    "TagMarkupException",
+    "Text",
+    "TextCanvas",
+    "TextError",
+    "TextLayout",
+    "Thin3x3Font",
+    "Thin4x3Font",
+    "Thin5x4Font",
+    "Thin6x6Font",
+    "TreeListBox",
+    "TreeNode",
+    "TreeWalker",
+    "TreeWidget",
+    "TreeWidgetError",
+    "VAlign",
+    "ValidationMessage",
+    "WHSettings",
+    "Widget",
+    "WidgetContainerMixin",
+    "WidgetDecoration",
+    "WidgetDisable",
+    "WidgetError",
+    "WidgetMeta",
+    "WidgetPlaceholder",
+    "WidgetWrap",
+    "WidgetWrapError",
+    "WrapMode",
+    "__version__",
+    "__version_tuple__",
+    "apply_target_encoding",
+    "calc_text_pos",
+    "calc_trim_text",
+    "calc_width",
+    "command_map",
+    "connect_signal",
+    "decompose_tagmarkup",
+    "default_layout",
+    "delegate_to_widget_mixin",
+    "detected_encoding",
+    "disconnect_signal",
+    "disconnect_signal_by_key",
+    "display",
+    "emit_signal",
+    "event_loop",
+    "fixed_size",
+    "get_all_fonts",
+    "get_ascii_fallbacks",
+    "get_encoding_mode",
+    "get_running_loop",
+    "get_running_loop_or_none",
+    "int_scale",
+    "is_mouse_event",
+    "is_wide_char",
+    "move_next_char",
+    "move_prev_char",
+    "register_signal",
+    "scale_bar_values",
+    "set_ascii_fallbacks",
+    "set_encoding",
+    "supports_unicode",
+    "widget",
+    "within_double_byte",
+)
+
+
+# Optional event loops with external dependencies
+
+try:
+    from .event_loop import TornadoEventLoop
+except ImportError:
+    pass
+else:
+    __all__ += ("TornadoEventLoop",)
+
+try:
+    from .event_loop import GLibEventLoop
+except ImportError:
+    pass
+else:
+    __all__ += ("GLibEventLoop",)
+
+try:
+    from .event_loop import TwistedEventLoop
+except ImportError:
+    pass
+else:
+    __all__ += ("TwistedEventLoop",)
+
+try:
+    from .event_loop import TrioEventLoop
+except ImportError:
+    pass
+else:
+    __all__ += ("TrioEventLoop",)
+
+# OS Specific
+if sys.platform != "win32":
+    from .vterm import TermCanvas, TermCharset, Terminal, TermModes
+
+    __all__ += ("TermCanvas", "TermCharset", "TermModes", "Terminal")
+
+    # ZMQEventLoop cause interpreter crash on Windows
+    try:
+        from .event_loop import ZMQEventLoop
+    except ImportError:
+        pass
+    else:
+        __all__ += ("ZMQEventLoop",)
+
+# Backward compatibility
+VERSION = __version_tuple__
+
+
+# Moved modules handling
+__locals: dict[str, typing.Any] = locals()  # use mutable access for pure lazy loading
+
+# Backward compatible lazy load with deprecation warnings
+_moved_warn: dict[str, str] = {
+    "display_common": "urwid.display.common",
+    "raw_display": "urwid.display.raw",
+    "curses_display": "urwid.display.curses",
+    "escape": "urwid.display.escape",
+}
+
+
+def lazy_import(name: str, package: str | None = None) -> types.ModuleType:
+    """Lazy import implementation from Python documentation.
+
+    Useful for cases where no warnings expected for moved modules.
+
+    :raises ImportError: *name* does not resolve to a loadable module.
+    """
+    spec = importlib.util.find_spec(name, package)
+    if not spec:
+        raise ImportError(f"No module named {name!r}")
+    if not spec.loader:
+        raise ImportError(f"Module named {name!r} is invalid")
+
+    loader = importlib.util.LazyLoader(spec.loader)
+    spec.loader = loader
+    module = importlib.util.module_from_spec(spec)
+    if not package:
+        sys.modules[name] = module
+    else:
+        sys.modules[f"{package.rstrip('.')}.{name.lstrip('.')}"] = module
+    loader.exec_module(module)
+    return module
+
+
+class _MovedModule(types.ModuleType):
+    """Special class to handle moved modules.
+
+    PEP-0562 handles moved modules attributes, but unfortunately not handle nested modules access
+    like "from xxx.yyy import zzz"
+    """
+
+    __slots__ = ("_moved_from", "_moved_to")
+
+    def __init__(self, moved_from: str, moved_to: str) -> None:
+        super().__init__(moved_from.join(".")[-1])
+        self._moved_from = moved_from
+        self._moved_to = moved_to
+
+    def __getattr__(self, name: str) -> typing.Any:
+        """Resolve `name` by importing the module this one moved to.
+
+        :raises AttributeError: *name* is not found, including when *self._moved_to* itself cannot be imported.
+        """
+        try:
+            real_module = importlib.import_module(self._moved_to)
+        except ImportError as exc:
+            raise AttributeError(name) from exc
+        sys.modules[self._moved_from] = real_module
+        return getattr(real_module, name)
+
+
+class _MovedModuleWarn(_MovedModule):
+    """Special class to handle moved modules.
+
+    Produce DeprecationWarning messages for imports.
+
+    .. deprecated:: 2.4.0
+        This API will be removed in version 7.0.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str) -> typing.Any:
+        if name.startswith("__") and name.endswith("__"):
+            # Introspection (for example `unittest` reading `__warningregistry__` of every module in `sys.modules`)
+            # must neither warn nor replace this stub with the real module.
+            raise AttributeError(name)
+        _deprecation.warn(f"{self._moved_from} is moved to {self._moved_to}.", since="2.4.0", removed_in="7.0")
+        return super().__getattr__(name)
+
+
+for _name, _module in _moved_warn.items():
+    _module_path = f"{__name__}.{_name}"
+    sys.modules[_module_path] = _MovedModuleWarn(_module_path, _module)
+
+
+def __getattr__(name: str) -> typing.Any:
+    """Get attributes lazy.
+
+    :returns: attribute by name
+    :raises AttributeError: attribute is not defined for lazy load
+
+    .. deprecated:: 2.4.0
+        ``urwid.display_common``, ``urwid.raw_display``, ``urwid.curses_display`` and ``urwid.escape`` moved to
+        ``urwid.display.common``, ``urwid.display.raw``, ``urwid.display.curses`` and ``urwid.display.escape``.
+        This API will be removed in version 7.0.
+    """
+    if name in _moved_warn:
+        _deprecation.warn(f"urwid.{name} is moved to {_moved_warn[name]}.", since="2.4.0", removed_in="7.0")
+
+        try:
+            mod = importlib.import_module(_moved_warn[name])
+        except ImportError as exc:
+            raise AttributeError(name) from exc
+        __locals[name] = mod
+        return mod
+    raise AttributeError(f"{name} not found in {__package__}")

@@ -1,0 +1,562 @@
+# Urwid unicode character processing tables
+#    Copyright (C) 2004-2011  Ian Ward
+#
+#    This library is free software; you can redistribute it and/or
+#    modify it under the terms of the GNU Lesser General Public
+#    License as published by the Free Software Foundation; either
+#    version 2.1 of the License, or (at your option) any later version.
+#
+#    This library is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#    Lesser General Public License for more details.
+#
+#    You should have received a copy of the GNU Lesser General Public
+#    License along with this library; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+# Urwid web site: https://urwid.org/
+
+
+"""Character width calculation and byte-string decoding for screen layout."""
+
+from __future__ import annotations
+
+import codecs
+import re
+import typing
+import warnings
+
+import wcwidth
+
+from urwid import _deprecation
+
+if typing.TYPE_CHECKING:
+    from typing import Literal
+
+    # Imported by name for type checkers, see urwid._deprecation.
+    from typing_extensions import deprecated
+else:
+    from urwid._deprecation import deprecated
+
+SAFE_ASCII_RE = re.compile(r"^[ -~]*$")
+SAFE_ASCII_BYTES_RE = re.compile(rb"^[ -~]*$")
+
+_byte_encoding: Literal["utf8", "narrow", "wide"] = "narrow"
+
+
+@deprecated(
+    "get_char_width is deprecated in favor of wcwidth.width. "
+    "Deprecated since urwid 3.0.4, will be removed in version 6.0.",
+    category=None,
+)
+def get_char_width(char: str) -> Literal[0, 1, 2]:
+    """
+    Return the screen column width for a single character.
+
+    .. deprecated:: 3.0.4
+        Use :func:`wcwidth.wcwidth` instead. This API will be removed in version 6.0.
+    """
+    _deprecation.warn("get_char_width is deprecated in favor of wcwidth.width.", since="3.0.4", removed_in="6.0")
+    if (width := wcwidth.wcwidth(char)) >= 0:
+        return typing.cast("Literal[0, 1, 2]", width)
+
+    return 0
+
+
+@deprecated(
+    "get_width is deprecated in favor of wcwidth.width. Deprecated since urwid 3.0.4, will be removed in version 6.0.",
+    category=None,
+)
+def get_width(o: int) -> Literal[0, 1, 2]:
+    """
+    Return the screen column width for unicode ordinal o.
+
+    .. deprecated:: 3.0.4
+        Use :func:`wcwidth.wcwidth` instead. This API will be removed in version 6.0.
+    """
+    _deprecation.warn("get_width is deprecated in favor of wcwidth.width.", since="3.0.4", removed_in="6.0")
+    if (width := wcwidth.wcwidth(chr(o))) >= 0:
+        return typing.cast("Literal[0, 1, 2]", width)
+
+    return 0
+
+
+def _decode_grapheme_at(text: bytes, start: int, end: int) -> tuple[str, int]:
+    """
+    Decode bytes starting at `start` to get the first grapheme cluster.
+
+    :param text: UTF-8 encoded bytes
+    :param start: starting byte position
+    :param end: ending byte position
+    :returns: (grapheme_string, next_byte_position)
+    :raises UnicodeDecodeError: the decoded bytes are not valid UTF-8.
+
+    Assumes caller provides valid UTF-8 byte boundaries.
+    Decodes a window that doubles until it holds a character past the first grapheme cluster,
+    so the cost follows the cluster length rather than the length of the rest of the text.
+    """
+    window = 16
+    while True:
+        stop = min(end, start + window)
+        # an incremental decoder keeps a character cut by the window end instead of failing on it
+        decoded = codecs.getincrementaldecoder("utf-8")().decode(text[start:stop], final=stop == end)
+        grapheme = next(wcwidth.iter_graphemes(decoded), "")
+        if len(grapheme) < len(decoded):
+            return grapheme, start + len(grapheme.encode("utf-8"))
+        if stop == end:
+            # the grapheme consumed the whole decoded window: its byte length is
+            # already known (end - start) without re-encoding it.
+            return grapheme, end
+        window *= 2
+
+
+def _first_grapheme(text: str, start: int, end: int) -> str:
+    """
+    Return the first grapheme cluster of text[start:end].
+
+    Segments a slice that doubles while the cluster reaches its end,
+    so the cost follows the cluster length rather than the length of the rest of the text.
+
+    :raises StopIteration: *start* is not before *end*.
+    """
+    window = 16
+    while True:
+        stop = min(end, start + window)
+        grapheme = next(wcwidth.iter_graphemes(text[start:stop]))
+        if start + len(grapheme) < stop or stop == end:
+            return grapheme
+        window *= 2
+
+
+def decode_one(text: bytes | str, pos: int) -> tuple[int, int]:
+    """
+    Return (ordinal at pos, next position) for UTF-8 encoded text.
+
+    :raises ValueError: *pos* is not a valid position in *text*.
+    """
+    lt = len(text) - pos
+
+    try:
+        if isinstance(text, str):
+            b1 = ord(text[pos])
+        else:
+            b1 = text[pos]
+    except Exception as e:
+        raise ValueError(f"{e}: text={text!r}, pos={pos!r}, lt={lt!r}").with_traceback(e.__traceback__) from e
+
+    if not b1 & 0x80:
+        return b1, pos + 1
+    error = ord("?"), pos + 1
+
+    if lt < 2:
+        return error
+
+    try:
+        if isinstance(text, str):
+            b2 = ord(text[pos + 1])
+        else:
+            b2 = text[pos + 1]
+    except Exception as e:
+        raise ValueError(f"{e}: text={text!r}, pos={pos!r}, lt={lt!r}").with_traceback(e.__traceback__) from e
+
+    if b1 & 0xE0 == 0xC0:
+        if b2 & 0xC0 != 0x80:
+            return error
+        if (o := ((b1 & 0x1F) << 6) | (b2 & 0x3F)) >= 0x80:
+            return o, pos + 2
+        return error
+    if lt < 3:
+        return error
+
+    try:
+        if isinstance(text, str):
+            b3 = ord(text[pos + 2])
+        else:
+            b3 = text[pos + 2]
+    except Exception as e:
+        raise ValueError(f"{e}: text={text!r}, pos={pos!r}, lt={lt!r}").with_traceback(e.__traceback__) from e
+
+    if b1 & 0xF0 == 0xE0:
+        if b2 & 0xC0 != 0x80:
+            return error
+        if b3 & 0xC0 != 0x80:
+            return error
+        if (o := ((b1 & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)) >= 0x800:
+            return o, pos + 3
+        return error
+    if lt < 4:
+        return error
+
+    try:
+        if isinstance(text, str):
+            b4 = ord(text[pos + 3])
+        else:
+            b4 = text[pos + 3]
+    except Exception as e:
+        raise ValueError(f"{e}: text={text!r}, pos={pos!r}, lt={lt!r}").with_traceback(e.__traceback__) from e
+
+    if b1 & 0xF8 == 0xF0:
+        if b2 & 0xC0 != 0x80:
+            return error
+        if b3 & 0xC0 != 0x80:
+            return error
+        if b4 & 0xC0 != 0x80:
+            return error
+        if (o := ((b1 & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)) >= 0x10000:
+            return o, pos + 4
+        return error
+    return error
+
+
+@deprecated(
+    "decode_one_uni is not used by the urwid code base. Deprecated since urwid 4.1.4, will be removed in version 6.0.",
+    category=None,
+)
+def decode_one_uni(text: str, i: int) -> tuple[int, int]:
+    """
+    decode_one implementation for unicode strings.
+
+    .. deprecated:: 4.1.4
+        Not used by the urwid code base; there is no replacement.
+        This API will be removed in version 6.0.
+    """
+    _deprecation.warn("decode_one_uni is not used by the urwid code base.", since="4.1.4", removed_in="6.0")
+    return ord(text[i]), i + 1
+
+
+@deprecated(
+    "decode_one_right is not used by the urwid code base. "
+    "Deprecated since urwid 4.1.4, will be removed in version 6.0.",
+    category=None,
+)
+def decode_one_right(text: bytes, pos: int) -> tuple[int, int] | None:
+    """Return (ordinal at pos, next position) for UTF-8 encoded text.
+
+    pos is assumed to be on the trailing byte of a utf-8 sequence.
+
+    :raises TypeError: *text* is not a byte string.
+
+    .. deprecated:: 4.1.4
+        Not used by the urwid code base; there is no replacement.
+        This API will be removed in version 6.0.
+    """
+    _deprecation.warn("decode_one_right is not used by the urwid code base.", since="4.1.4", removed_in="6.0")
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+    error = ord("?"), pos - 1
+    p = pos
+    while p >= 0:
+        if text[p] & 0xC0 != 0x80:
+            o, _next_pos = decode_one(text, p)
+            return o, p - 1
+        p -= 1
+        if p == p - 4:
+            return error
+    return None
+
+
+def set_byte_encoding(enc: Literal["utf8", "narrow", "wide"]) -> None:
+    """
+    Select the byte encoding used to interpret byte strings.
+
+    :raises ValueError: *enc* is not one of the supported encodings.
+    """
+    if enc not in {"utf8", "narrow", "wide"}:
+        raise ValueError(enc)
+    global _byte_encoding  # noqa: PLW0603  # pylint: disable=global-statement
+    _byte_encoding = enc
+
+
+def get_byte_encoding() -> Literal["utf8", "narrow", "wide"]:
+    """Return the byte encoding currently selected by :func:`set_byte_encoding`."""
+    return _byte_encoding
+
+
+def calc_string_text_pos(text: str, start_offs: int, end_offs: int, pref_col: int) -> tuple[int, int]:
+    """Calculate the closest position to the screen column pref_col in text.
+
+    start_offs is the offset into text assumed to be screen column 0
+    and end_offs is the end of the range to search.
+
+    Iterates by grapheme clusters for emoji ZWJ sequences, flags,
+    combining characters, and other multi-codepoint unicode sequences.
+    Segments a window that doubles until the result is found,
+    so the cost follows the length of the returned range rather than the length of the whole range.
+
+    :param text: string
+    :param start_offs: starting text position
+    :param end_offs: ending text position
+    :param pref_col: target column
+    :returns: (position, actual_col)
+    :raises ValueError: *start_offs* is past *end_offs*.
+    """
+    if start_offs > end_offs:
+        raise ValueError((start_offs, end_offs))
+
+    cols = 0
+    pos = start_offs
+    window = max(pref_col, 0) + 16
+    while True:
+        stop = min(end_offs, pos + window)
+        # iterating a slice uses the C segmenter of wcwidth, iterating a range of the whole text does not
+        for grapheme in wcwidth.iter_graphemes(text[pos:stop]):
+            if pos + len(grapheme) == stop < end_offs:
+                break  # the window end may cut this cluster: segment it again in a larger window
+            grapheme_width = wcwidth.width(grapheme, control_codes="ignore")
+            if grapheme_width + cols > pref_col:
+                return pos, cols
+            cols += grapheme_width
+            pos += len(grapheme)
+        else:
+            return end_offs, cols
+        window *= 2
+
+
+def calc_text_pos(text: str | bytes, start_offs: int, end_offs: int, pref_col: int) -> tuple[int, int]:
+    """Calculate the closest position to the screen column pref_col in text.
+
+    start_offs is the offset into text assumed to be screen column 0
+    and end_offs is the end of the range to search.
+
+    text may be unicode or a byte string in the target _byte_encoding
+
+    :returns: (position, actual_col).
+    :raises ValueError: *start_offs* is past *end_offs*.
+    :raises TypeError: the byte encoding is in use and *text* is not a byte string.
+    :raises UnicodeDecodeError: the byte encoding is UTF-8 and the decoded bytes are not valid UTF-8.
+    """
+    if start_offs > end_offs:
+        raise ValueError((start_offs, end_offs))
+
+    if isinstance(text, str):
+        return calc_string_text_pos(text, start_offs, end_offs, pref_col)
+
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+
+    if _byte_encoding == "utf8":
+        # decode a window that doubles until a cluster that is whole in it crosses pref_col,
+        # so the cost follows the length of the returned range rather than the length of the whole range
+        window = 4 * max(pref_col, 0) + 16
+        while True:
+            stop = min(end_offs, start_offs + window)
+            decoded = codecs.getincrementaldecoder("utf-8")().decode(text[start_offs:stop], final=stop == end_offs)
+            str_pos, cols = calc_string_text_pos(decoded, 0, len(decoded), pref_col)
+            if stop == end_offs:
+                if str_pos == len(decoded):
+                    # the whole decoded window was consumed: its byte length is already
+                    # known (end_offs - start_offs) without re-encoding it.
+                    return end_offs, cols
+                break
+            if str_pos < wcwidth.grapheme_boundary_before(decoded, len(decoded)):
+                break
+            window *= 2
+        byte_offset = len(decoded[:str_pos].encode("utf-8"))
+        return start_offs + byte_offset, cols
+
+    # "wide" and "narrow"
+    i = start_offs + pref_col
+    if i >= end_offs:
+        return end_offs, end_offs - start_offs
+    if _byte_encoding == "wide" and within_double_byte(text, start_offs, i) == 2:
+        i -= 1
+    return i, i - start_offs
+
+
+def calc_width(text: str | bytes, start_offs: int, end_offs: int) -> int:
+    """
+    Return the screen column width of text between start_offs and end_offs.
+
+    text may be unicode or a byte string in the target _byte_encoding
+
+    Some characters are wide (take two columns) and others affect the
+    previous character (take zero columns), while others are grouped
+    in sequence by "grapheme boundaries" (Emoji, Skin tones, flags, etc).
+
+    :raises ValueError: *start_offs* is past *end_offs*.
+    :warns UnicodeWarning: the byte encoding is UTF-8 and the bytes between the offsets are not valid UTF-8.
+    """
+    if start_offs > end_offs:
+        msg = f"{start_offs=} > {end_offs=}"
+        raise ValueError(msg)
+
+    if isinstance(text, str):
+        return wcwidth.width(text[start_offs:end_offs], control_codes="ignore")
+
+    if _byte_encoding == "utf8":
+        try:
+            return wcwidth.width(text[start_offs:end_offs].decode("utf-8"), control_codes="ignore")
+        except UnicodeDecodeError as exc:
+            warnings.warn(
+                "`calc_width` with text encoded to bytes can produce incorrect results "
+                f"due to possible offset in the middle of character: {exc}",
+                UnicodeWarning,
+                stacklevel=2,
+            )
+
+        i = start_offs
+        sc = 0
+        while i < end_offs:
+            o, i = decode_one(text, i)
+            if (w := wcwidth.wcwidth(chr(o))) > 0:
+                sc += w
+        return sc
+    # "wide", "narrow" or all printable ASCII, just return the character count
+    return end_offs - start_offs
+
+
+def is_wide_char(text: str | bytes, offs: int) -> bool:
+    """
+    Test if the grapheme cluster at offs within text is wide (2 columns).
+
+    For Unicode strings, extracts the full grapheme cluster starting at offs
+    and checks if it renders as wide. This correctly handles multi-codepoint
+    graphemes like emoji ZWJ sequences and flags.
+
+    text may be unicode or a byte string in the target _byte_encoding
+
+    :raises TypeError: the byte encoding is in use and *text* is not a byte string.
+    """
+    if isinstance(text, str):
+        grapheme = _first_grapheme(text, offs, len(text))
+        return wcwidth.width(grapheme, control_codes="ignore") == 2
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+    if _byte_encoding == "utf8":
+        grapheme, _ = _decode_grapheme_at(text, offs, len(text))
+        return wcwidth.width(grapheme, control_codes="ignore") == 2
+    if _byte_encoding == "wide":
+        return within_double_byte(text, offs, offs) == 1
+    return False
+
+
+def move_prev_char(text: str | bytes, start_offs: int, end_offs: int) -> int:
+    """
+    Return the position of the grapheme cluster before end_offs, never before start_offs.
+
+    For Unicode strings, handle multi-codepoint, "grapheme clusters",
+    to better measure emoji ZWJ, flags, combining characters, skin tones.
+    A cluster that starts before start_offs is cut at start_offs, as the byte string path does.
+
+    :raises ValueError: *start_offs* is not before *end_offs*.
+    :raises TypeError: the byte encoding is in use and *text* is not a byte string.
+    """
+    if start_offs >= end_offs:
+        raise ValueError((start_offs, end_offs))
+    if isinstance(text, str):
+        return max(start_offs, wcwidth.grapheme_boundary_before(text, end_offs))
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+    if _byte_encoding == "utf8":
+        decoded = text[start_offs:end_offs].decode("utf-8")
+        str_pos = len(decoded)
+        prev_str_pos = wcwidth.grapheme_boundary_before(decoded, str_pos)
+        # Encode only the removed suffix (normally short) rather than the
+        # (potentially much longer) retained prefix, since prefix length in
+        # bytes is just the total minus the suffix length in bytes.
+        suffix = decoded[prev_str_pos:]
+        return end_offs - len(suffix.encode("utf-8"))
+    if _byte_encoding == "wide" and within_double_byte(text, start_offs, end_offs - 1) == 2:
+        return end_offs - 2
+    return end_offs - 1
+
+
+def move_next_char(text: str | bytes, start_offs: int, end_offs: int) -> int:
+    """
+    Return the position of the next grapheme cluster after start_offs.
+
+    For Unicode strings, handle multi-codepoint, "grapheme clusters",
+    to better measure emoji ZWJ, flags, combining characters, skin tones.
+
+    :raises ValueError: *start_offs* is not before *end_offs*.
+    :raises TypeError: the byte encoding is in use and *text* is not a byte string.
+    """
+    if start_offs >= end_offs:
+        raise ValueError((start_offs, end_offs))
+    if isinstance(text, str):
+        return start_offs + len(_first_grapheme(text, start_offs, end_offs))
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+    if _byte_encoding == "utf8":
+        _, next_pos = _decode_grapheme_at(text, start_offs, end_offs)
+        return next_pos
+    if _byte_encoding == "wide" and within_double_byte(text, start_offs, start_offs) == 1:
+        return start_offs + 2
+    return start_offs + 1
+
+
+def _grapheme_boundary(text: str | bytes, pos: int, *, forward: bool) -> int:
+    """
+    Return *pos* when it is a grapheme cluster boundary of *text*, otherwise the nearest boundary in one direction.
+
+    :param text: unicode text, or a byte string in the target _byte_encoding
+    :param pos: offset into *text*, from ``0`` to ``len(text)``
+    :param forward: return the end of the cluster containing *pos* instead of its start
+    :raises TypeError: the byte encoding is in use and *text* is not a byte string.
+    """
+    if pos <= 0 or pos >= len(text):
+        return pos
+    if isinstance(text, str):
+        # the cluster containing pos is the one before pos + 1
+        start = wcwidth.grapheme_boundary_before(text, pos + 1)
+        if start == pos or not forward:
+            return start
+        return start + len(_first_grapheme(text, start, len(text)))
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+    if _byte_encoding == "utf8":
+        char_end = pos + 1
+        while char_end < len(text) and 0x80 <= text[char_end] < 0xC0:  # UTF-8 continuation byte
+            char_end += 1
+        try:
+            decoded = text[:char_end].decode("utf-8")
+            cluster_tail = decoded[wcwidth.grapheme_boundary_before(decoded, len(decoded)) :]
+            start = char_end - len(cluster_tail.encode("utf-8"))
+            if start == pos or not forward:
+                return start
+            return _decode_grapheme_at(text, start, len(text))[1]
+        except UnicodeDecodeError:
+            # text that is not valid UTF-8 has no clusters to keep whole, as calc_width tolerates it
+            return pos
+    if _byte_encoding == "wide" and within_double_byte(text, 0, pos) == 2:
+        return pos + 1 if forward else pos - 1
+    return pos
+
+
+def within_double_byte(text: bytes, line_start: int, pos: int) -> Literal[0, 1, 2]:
+    """Return whether pos is within a double-byte encoded character.
+
+    :param text: byte string in question
+    :param line_start: offset of beginning of line (< pos)
+    :param pos: offset in question
+    :returns: ``0`` if not within a double-byte character, or the byte encoding is not double-byte,
+        ``1`` if pos is on the first half of a double-byte character,
+        ``2`` if pos is on the second half of a double-byte character.
+    :raises TypeError: *text* is not a byte string.
+    """
+    if not isinstance(text, bytes):
+        raise TypeError(text)
+    v = text[pos]
+
+    if 0x40 <= v < 0x7F:
+        # might be second half of big5, uhc or gbk encoding
+        if pos == line_start:
+            return 0
+
+        if text[pos - 1] >= 0x81 and within_double_byte(text, line_start, pos - 1) == 1:
+            return 2
+        return 0
+
+    if v < 0x80:
+        return 0
+
+    i = pos - 1
+    while i >= line_start:
+        if text[i] < 0x80:
+            break
+        i -= 1
+
+    if (pos - i) & 1:
+        return 1
+    return 2

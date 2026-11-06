@@ -1,0 +1,4 @@
+windowsize --usehints $TERMWINDOWID 21 7
+windowsize --usehints $TERMWINDOWID 10 9
+windowsize --usehints $TERMWINDOWID 30 3
+windowsize --usehints $TERMWINDOWID 15 2

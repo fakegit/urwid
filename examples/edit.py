@@ -17,10 +17,10 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
 """
-Urwid example lazy text editor suitable for tabbed and flowing text
+Urwid example lazy text editor suitable for tabbed and flowing text.
 
 Features:
 - custom list walker for lazily loading text file
@@ -30,57 +30,73 @@ edit.py <filename>
 
 """
 
+from __future__ import annotations
+
 import sys
+import typing
 
 import urwid
 
 
-class LineWalker(urwid.ListWalker):
+class LineWalker(urwid.ListWalker[int, urwid.Edit]):
     """ListWalker-compatible class for lazily reading file contents."""
 
-    def __init__(self, name):
-        self.file = open(name)
-        self.lines = []
+    def __init__(self, name: str) -> None:
+        """Initialize with `name` opened for lazy line-by-line reading, no lines loaded yet."""
+        # do not overcomplicate example
+        self.file: typing.TextIO | None = open(  # noqa: SIM115  # pylint: disable=consider-using-with
+            name,
+            encoding="utf-8",
+        )
+        self.lines: list[urwid.Edit] = []
         self.focus = 0
 
-    def get_focus(self):
+    def __del__(self) -> None:
+        """Close the open file, if any."""
+        if self.file is not None:
+            self.file.close()
+
+    def get_focus(self) -> tuple[urwid.Edit, int] | tuple[None, None]:
+        """Return the widget and position for the current focus."""
         return self._get_at_pos(self.focus)
 
-    def set_focus(self, focus):
+    def set_focus(self, focus: int) -> None:
+        """Set the focus position."""
         self.focus = focus
         self._modified()
 
-    def get_next(self, start_from):
-        return self._get_at_pos(start_from + 1)
+    def get_next(self, position: int) -> tuple[urwid.Edit, int] | tuple[None, None]:
+        """Return the widget and position after the given position."""
+        return self._get_at_pos(position + 1)
 
-    def get_prev(self, start_from):
-        return self._get_at_pos(start_from - 1)
+    def get_prev(self, position: int) -> tuple[urwid.Edit, int] | tuple[None, None]:
+        """Return the widget and position before the given position."""
+        return self._get_at_pos(position - 1)
 
-    def read_next_line(self):
-        """Read another line from the file."""
+    def read_next_line(self) -> str:
+        """Read another line from the file.
+
+        :raises AssertionError: if called after the file has already been closed.
+        """
+        assert self.file is not None, "read past end of file"  # noqa: S101  # "assert" is OK in examples
 
         next_line = self.file.readline()
 
-        if not next_line or next_line[-1:] != '\n':
+        if not next_line or next_line[-1:] != "\n":
             # no newline on last line of file
             self.file = None
         else:
             # trim newline characters
             next_line = next_line[:-1]
 
-        expanded = next_line.expandtabs()
-
-        edit = urwid.Edit("", expanded, allow_tab=True)
-        edit.set_edit_pos(0)
-        edit.original_text = next_line
+        edit = urwid.Edit("", next_line, allow_tab=True, expand_tabs=True)
+        edit.edit_pos = 0
         self.lines.append(edit)
 
         return next_line
 
-
-    def _get_at_pos(self, pos):
+    def _get_at_pos(self, pos: int) -> tuple[urwid.Edit, int] | tuple[None, None]:
         """Return a widget for the line number passed."""
-
         if pos < 0:
             # line 0 is the start of the file, no more above
             return None, None
@@ -93,27 +109,24 @@ class LineWalker(urwid.ListWalker):
             # file is closed, so there are no more lines
             return None, None
 
-        assert pos == len(self.lines), "out of order request?"
+        assert pos == len(self.lines), "out of order request?"  # noqa: S101  # "assert" is OK in examples
 
         self.read_next_line()
 
         return self.lines[-1], pos
 
-    def split_focus(self):
+    def split_focus(self) -> None:
         """Divide the focus edit widget at the cursor location."""
-
         focus = self.lines[self.focus]
         pos = focus.edit_pos
-        edit = urwid.Edit("",focus.edit_text[pos:], allow_tab=True)
-        edit.original_text = ""
+        edit = urwid.Edit("", focus.edit_text[pos:], allow_tab=True, expand_tabs=True)
         focus.set_edit_text(focus.edit_text[:pos])
-        edit.set_edit_pos(0)
-        self.lines.insert(self.focus+1, edit)
+        edit.edit_pos = 0
+        self.lines.insert(self.focus + 1, edit)
 
-    def combine_focus_with_prev(self):
+    def combine_focus_with_prev(self) -> None:
         """Combine the focus edit widget with the one above."""
-
-        above, ignore = self.get_prev(self.focus)
+        above, _ = self.get_prev(self.focus)
         if above is None:
             # already at the top
             return
@@ -124,53 +137,64 @@ class LineWalker(urwid.ListWalker):
         del self.lines[self.focus]
         self.focus -= 1
 
-    def combine_focus_with_next(self):
+    def combine_focus_with_next(self) -> None:
         """Combine the focus edit widget with the one below."""
-
-        below, ignore = self.get_next(self.focus)
+        below, _ = self.get_next(self.focus)
         if below is None:
             # already at bottom
             return
 
         focus = self.lines[self.focus]
         focus.set_edit_text(focus.edit_text + below.edit_text)
-        del self.lines[self.focus+1]
+        del self.lines[self.focus + 1]
 
 
 class EditDisplay:
-    palette = [
-        ('body','default', 'default'),
-        ('foot','dark cyan', 'dark blue', 'bold'),
-        ('key','light cyan', 'dark blue', 'underline'),
-        ]
+    """Text editor application, tying the file walker to the urwid widget tree."""
 
-    footer_text = ('foot', [
-        "Text Editor    ",
-        ('key', "F5"), " save  ",
-        ('key', "F8"), " quit",
-        ])
+    palette: typing.ClassVar[list[tuple[str, str, str] | tuple[str, str, str, str]]] = [
+        ("body", "default", "default"),
+        ("foot", "dark cyan", "dark blue", "bold"),
+        ("key", "light cyan", "dark blue", "underline"),
+    ]
 
-    def __init__(self, name):
+    footer_text: typing.ClassVar[tuple[str, list[str | tuple[str, str]]]] = (
+        "foot",
+        [
+            "Text Editor    ",
+            ("key", "F5"),
+            " save  ",
+            ("key", "F8"),
+            " quit",
+        ],
+    )
+
+    def __init__(self, name: str) -> None:
+        """Initialize with the file at `name` loaded for editing."""
         self.save_name = name
         self.walker = LineWalker(name)
-        self.listbox = urwid.ListBox(self.walker)
-        self.footer = urwid.AttrWrap(urwid.Text(self.footer_text),
-            "foot")
-        self.view = urwid.Frame(urwid.AttrWrap(self.listbox, 'body'),
-            footer=self.footer)
+        self.listbox: urwid.ListBox[int] = urwid.ListBox(self.walker)
+        self.footer = urwid.AttrMap(urwid.Text(self.footer_text), "foot")
+        self.view: urwid.Frame[
+            urwid.AttrMap[urwid.ListBox[int]],
+            None,
+            urwid.AttrMap[urwid.Text],
+        ] = urwid.Frame(urwid.AttrMap(self.listbox, "body"), footer=self.footer)
 
-    def main(self):
-        self.loop = urwid.MainLoop(self.view, self.palette,
-            unhandled_input=self.unhandled_keypress)
+    def main(self) -> None:
+        """Run the text editor application."""
+        self.loop = urwid.MainLoop(self.view, self.palette, unhandled_input=self.unhandled_keypress)
         self.loop.run()
 
-    def unhandled_keypress(self, k):
-        """Last resort for keypresses."""
+    def unhandled_keypress(self, k: str | tuple[str, int, int, int]) -> bool | None:
+        """Last resort for keypresses.
 
+        :raises urwid.ExitMainLoop: :kbd:`f8` is pressed.
+        """
         if k == "f5":
             self.save_file()
         elif k == "f8":
-            raise urwid.ExitMainLoop()
+            raise urwid.ExitMainLoop
         elif k == "delete":
             # delete at end of line
             self.walker.combine_focus_with_next()
@@ -183,73 +207,48 @@ class EditDisplay:
             # move the cursor to the new line and reset pref_col
             self.loop.process_input(["down", "home"])
         elif k == "right":
-            w, pos = self.walker.get_focus()
-            w, pos = self.walker.get_next(pos)
-            if w:
-                self.listbox.set_focus(pos, 'above')
+            _w, pos = self.walker.get_next(self.walker.focus)
+            if pos is not None:
+                self.listbox.set_focus(pos, "above")
                 self.loop.process_input(["home"])
         elif k == "left":
-            w, pos = self.walker.get_focus()
-            w, pos = self.walker.get_prev(pos)
-            if w:
-                self.listbox.set_focus(pos, 'below')
+            _w, pos = self.walker.get_prev(self.walker.focus)
+            if pos is not None:
+                self.listbox.set_focus(pos, "below")
                 self.loop.process_input(["end"])
         else:
-            return
+            return None
         return True
 
-
-    def save_file(self):
+    def save_file(self) -> None:
         """Write the file out to disk."""
-
-        l = []
         walk = self.walker
-        for edit in walk.lines:
-            # collect the text already stored in edit widgets
-            if edit.original_text.expandtabs() == edit.edit_text:
-                l.append(edit.original_text)
-            else:
-                l.append(re_tab(edit.edit_text))
+        # collect the text already stored in edit widgets
+        lines = [edit.edit_text for edit in walk.lines]
 
         # then the rest
         while walk.file is not None:
-            l.append(walk.read_next_line())
+            lines.append(walk.read_next_line())
 
         # write back to disk
-        outfile = open(self.save_name, "w")
-
-        prefix = ""
-        for line in l:
-            outfile.write(prefix + line)
-            prefix = "\n"
-
-def re_tab(s):
-    """Return a tabbed string from an expanded one."""
-    l = []
-    p = 0
-    for i in range(8, len(s), 8):
-        if s[i-2:i] == "  ":
-            # collapse two or more spaces into a tab
-            l.append(s[p:i].rstrip() + "\t")
-            p = i
-
-    if p == 0:
-        return s
-    else:
-        l.append(s[p:])
-        return "".join(l)
+        with open(self.save_name, "w", encoding="utf-8") as outfile:
+            prefix = ""
+            for line in lines:
+                outfile.write(prefix + line)
+                prefix = "\n"
 
 
-
-def main():
+def main() -> None:
+    """Open the file named on the command line and run the editor on it."""
     try:
         name = sys.argv[1]
-        assert open(name, "a")
-    except:
-        sys.stderr.write(__doc__)
+        # do not overcomplicate example
+        assert open(name, "ab")  # noqa: SIM115,S101  # pylint: disable=consider-using-with
+    except OSError:
+        sys.stderr.write(__doc__ or "")  # noqa: FURB143  # __doc__ is None under python -OO
         return
     EditDisplay(name).main()
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()

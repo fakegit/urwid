@@ -1,0 +1,261 @@
+"""LineBox: a decoration that draws a line border and title around a widget."""
+
+from __future__ import annotations
+
+import typing
+
+from urwid.util import decompose_tagmarkup
+
+from .columns import Columns
+from .constants import BOX_SYMBOLS, Align, Sizing, WHSettings, WrapMode
+from .divider import Divider
+from .pile import Pile
+from .solid_fill import SolidFill
+from .text import Text
+from .widget_decoration import WidgetDecoration, delegate_to_widget_mixin
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Hashable
+    from typing import Literal
+
+    from urwid.util import _TagMarkup
+
+    from .widget import AbstractWidget, Widget, _DelegateToWidgetAfterDecorationMixin
+
+WrappedWidget = typing.TypeVar("WrappedWidget", bound="AbstractWidget")
+
+
+if typing.TYPE_CHECKING:
+    _LineBoxDelegate = _DelegateToWidgetAfterDecorationMixin
+else:
+    _LineBoxDelegate = delegate_to_widget_mixin("_wrapped_widget")
+
+
+class LineBox(
+    WidgetDecoration[WrappedWidget],
+    _LineBoxDelegate,
+):
+    """Box widget decoration that draws a line border, with an optional title, around another widget."""
+
+    Symbols = BOX_SYMBOLS
+
+    def __init__(
+        self,
+        original_widget: WrappedWidget,
+        title: _TagMarkup = "",
+        title_align: Literal["left", "center", "right"] | Align = Align.CENTER,
+        title_attr: Hashable = None,
+        tlcorner: str = BOX_SYMBOLS.LIGHT.TOP_LEFT,
+        tline: str = BOX_SYMBOLS.LIGHT.HORIZONTAL,
+        lline: str = BOX_SYMBOLS.LIGHT.VERTICAL,
+        trcorner: str = BOX_SYMBOLS.LIGHT.TOP_RIGHT,
+        blcorner: str = BOX_SYMBOLS.LIGHT.BOTTOM_LEFT,
+        rline: str = BOX_SYMBOLS.LIGHT.VERTICAL,
+        bline: str = BOX_SYMBOLS.LIGHT.HORIZONTAL,
+        brcorner: str = BOX_SYMBOLS.LIGHT.BOTTOM_RIGHT,
+    ) -> None:
+        """
+        Draw a line around original_widget.
+
+        Use 'title' to set an initial title text with will be centered
+        on top of the box. It may be any text markup accepted by :class:`Text`.
+        A title wider than the top line is cut with an ellipsis.
+
+        Use `title_attr` to apply a specific attribute to the title text.
+
+        Use `title_align` to align the title to the 'left', 'right', or 'center'.
+        The default is 'center'.
+
+        You can also override the widgets used for the lines/corners:
+            tline: top line
+            bline: bottom line
+            lline: left line
+            rline: right line
+            tlcorner: top left corner
+            trcorner: top right corner
+            blcorner: bottom left corner
+            brcorner: bottom right corner
+
+        If empty string is specified for one of the lines/corners, then no character will be output there.
+        If no top/bottom/left/right lines - whole lines will be omitted.
+        This allows for seamless use of adjoining LineBoxes.
+
+        Class attribute `Symbols` can be used as source for standard lines:
+
+        >>> print(LineBox(Text("Some text")).render(()))
+        ┌─────────┐
+        │Some text│
+        └─────────┘
+        >>> print(
+        ...     LineBox(
+        ...         Text("Some text"),
+        ...         tlcorner=LineBox.Symbols.LIGHT.TOP_LEFT_ROUNDED,
+        ...         trcorner=LineBox.Symbols.LIGHT.TOP_RIGHT_ROUNDED,
+        ...         blcorner=LineBox.Symbols.LIGHT.BOTTOM_LEFT_ROUNDED,
+        ...         brcorner=LineBox.Symbols.LIGHT.BOTTOM_RIGHT_ROUNDED,
+        ...     ).render(())
+        ... )
+        ╭─────────╮
+        │Some text│
+        ╰─────────╯
+        >>> print(
+        ...     LineBox(
+        ...         Text("Some text"),
+        ...         tline=LineBox.Symbols.HEAVY.HORIZONTAL,
+        ...         bline=LineBox.Symbols.HEAVY.HORIZONTAL,
+        ...         lline=LineBox.Symbols.HEAVY.VERTICAL,
+        ...         rline=LineBox.Symbols.HEAVY.VERTICAL,
+        ...         tlcorner=LineBox.Symbols.HEAVY.TOP_LEFT,
+        ...         trcorner=LineBox.Symbols.HEAVY.TOP_RIGHT,
+        ...         blcorner=LineBox.Symbols.HEAVY.BOTTOM_LEFT,
+        ...         brcorner=LineBox.Symbols.HEAVY.BOTTOM_RIGHT,
+        ...     ).render(())
+        ... )
+        ┏━━━━━━━━━┓
+        ┃Some text┃
+        ┗━━━━━━━━━┛
+
+        To make Table constructions, some lineboxes need to be drawn without sides
+        and T or CROSS symbols used for corners of cells.
+
+        :raises ValueError: a *title* with text is given while *tline* is empty,
+            or *title_align* is not a supported alignment.
+        """
+        w_lline = SolidFill(lline)
+        w_rline = SolidFill(rline)
+
+        w_tlcorner, w_tline, w_trcorner = Text(tlcorner), Divider(tline), Text(trcorner)
+        w_blcorner, w_bline, w_brcorner = Text(blcorner), Divider(bline), Text(brcorner)
+
+        formatted_title = self.format_title(title)
+        if not tline and title and formatted_title:
+            raise ValueError("Cannot have a title when tline is empty string")
+
+        if title_attr:
+            self.title_widget = Text((title_attr, formatted_title), wrap=WrapMode.ELLIPSIS)
+        else:
+            self.title_widget = Text(formatted_title, wrap=WrapMode.ELLIPSIS)
+
+        if tline:
+            if title_align not in {Align.LEFT, Align.CENTER, Align.RIGHT}:
+                raise ValueError('title_align must be one of "left", "right", or "center"')
+            if title_align == Align.LEFT:
+                tline_widgets: list[tuple[Literal[WHSettings.PACK], Widget] | Widget] = [
+                    (WHSettings.PACK, self.title_widget),
+                    w_tline,
+                ]
+            else:
+                tline_widgets = [w_tline, (WHSettings.PACK, self.title_widget)]
+                if title_align == Align.CENTER:
+                    tline_widgets.append(w_tline)
+
+            # The lines beside the title may shrink to nothing, so a long title is cut rather than dropped.
+            self.tline_widget: Columns | None = Columns(tline_widgets, min_width=0)
+            top = Columns(
+                (
+                    (int(bool(tlcorner and lline)), w_tlcorner),
+                    self.tline_widget,
+                    (int(bool(trcorner and rline)), w_trcorner),
+                )
+            )
+
+        else:
+            self.tline_widget = None
+            top = None
+
+        # Note: We need to define a fixed first widget (even if it's 0 width) so that the other
+        # widgets have something to anchor onto.
+        # A fixed-only widget cannot take a width from a weight column, so its column packs to the widget's width.
+        middle = Columns(
+            (
+                (int(bool(lline)), w_lline),
+                (
+                    original_widget
+                    if original_widget.sizing() & {Sizing.BOX, Sizing.FLOW}
+                    else (WHSettings.PACK, original_widget)
+                ),
+                (int(bool(rline)), w_rline),
+            ),
+            box_columns=[0, 2],
+            focus_column=original_widget,
+        )
+
+        if bline:
+            bottom = Columns(
+                (
+                    (int(bool(blcorner and lline)), w_blcorner),
+                    w_bline,
+                    (int(bool(brcorner and rline)), w_brcorner),
+                )
+            )
+        else:
+            bottom = None
+
+        pile_widgets: list[tuple[Literal[WHSettings.PACK], Widget] | Widget] = []
+        if top:
+            pile_widgets.append((WHSettings.PACK, top))
+        pile_widgets.append(middle)
+        if bottom:
+            pile_widgets.append((WHSettings.PACK, bottom))
+
+        self._wrapped_widget = Pile(pile_widgets, focus_item=middle)
+
+        super().__init__(original_widget)
+
+    @property
+    def original_widget(self) -> WrappedWidget:
+        """Return the widget wrapped by the line box."""
+        return super().original_widget
+
+    @original_widget.setter
+    def original_widget(self, original_widget: WrappedWidget) -> None:
+        v_index = int(bool(self.tline_widget))  # we care only about top
+        h_index = 1  # constant
+        middle: Columns = typing.cast("Columns", self._wrapped_widget[v_index])
+        options = (
+            middle.options()
+            if original_widget.sizing() & {Sizing.BOX, Sizing.FLOW}
+            else middle.options(WHSettings.PACK)
+        )
+        middle.contents[h_index] = (original_widget, options)  # type: ignore[assignment]
+        WidgetDecoration.original_widget.fset(self, original_widget)  # type: ignore[attr-defined]
+
+    @property
+    def _w(self) -> Pile:
+        return self._wrapped_widget
+
+    def format_title(self, text: _TagMarkup) -> _TagMarkup:
+        """
+        Return ``text`` padded with spaces for display in the box's top border, or an empty string if unset.
+
+        A string stays a string; other text markup is returned as the list ``[" ", text, " "]``.
+        Markup with no text, such as ``("attr", "")``, counts as unset.
+        """
+        if not text:
+            return ""
+        if isinstance(text, str):
+            return f" {text} "
+        if not decompose_tagmarkup(text)[0]:
+            return ""
+        return [" ", text, " "]
+
+    def set_title(self, text: _TagMarkup) -> None:
+        """
+        Set the title shown in the top line of the box.
+
+        :raises ValueError: this LineBox has no top line to put a title on.
+        """
+        if not self.tline_widget:
+            raise ValueError("Cannot set title when tline is unset")
+        self.title_widget.set_text(self.format_title(text))
+        self.tline_widget._invalidate()
+
+    @property
+    def focus(self) -> AbstractWidget | None:
+        """LineBox is partially container.
+
+        While focus position is a bit hacky
+        (formally it's not container and only position 0 available),
+        focus widget is always provided by original widget.
+        """
+        return self._original_widget.focus

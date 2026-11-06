@@ -1,0 +1,38 @@
+{
+  "build": {
+    "dockerfile": "dev.dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli": {}
+  },
+  "customizations": {
+    "jetbrains": {
+      "settings": {
+        "com.intellij:app:Vcs-Log-App-Settings.show_changes_from_parents": true
+      }
+    },
+    "vscode": {
+      "settings": {
+        "python.terminal.activateEnvInCurrentTerminal": true,
+        "python.defaultInterpreterPath": "/home/ubuntu/.venv-urwid/bin/python",
+        "python.testing.unittestEnabled": true
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.debugpy",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "GitHub.vscode-github-actions"
+      ]
+    }
+  },
+  "name": "urwid-dev",
+  "containerUser": "ubuntu",
+  "init": true,
+  "postCreateCommand": "uv venv /home/ubuntu/.venv-urwid && uv sync --all-groups",
+  "postStartCommand": "uv sync --all-groups --all-extras",
+  "mounts": [
+    "source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly"
+  ]
+}

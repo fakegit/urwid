@@ -1,6 +1,3 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-#
 # Urwid utility functions
 #    Copyright (C) 2004-2011  Ian Ward
 #
@@ -18,75 +15,154 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
-from __future__ import division, print_function
 
-from urwid import escape
-from urwid.compat import bytes, text_type, text_types
+"""Encoding detection and conversion, run-length encoding and markup helpers."""
+
+from __future__ import annotations
 
 import codecs
+import contextlib
+import functools
+import itertools
+import sys
+import typing
+from contextlib import suppress
+from types import MappingProxyType
 
-str_util = escape.str_util
+import wcwidth
 
-# bring str_util functions into our namespace
-calc_text_pos = str_util.calc_text_pos
-calc_width = str_util.calc_width
-is_wide_char = str_util.is_wide_char
-move_next_char = str_util.move_next_char
-move_prev_char = str_util.move_prev_char
-within_double_byte = str_util.within_double_byte
+from urwid import _deprecation, str_util
+
+if typing.TYPE_CHECKING:
+    from collections.abc import Generator, Hashable, Iterable, Iterator, Mapping, MutableSequence, Sequence
+    from types import TracebackType
+    from typing import Literal, Protocol, Self
+
+    class CanBeStopped(Protocol):
+        """Protocol for an object providing a no-argument ``stop()`` method."""
+
+        def stop(self) -> None:
+            """Stop whatever the implementing object is running."""
+
+    class _TagMarkupList(Protocol):
+        """List of markup parts joined together by `decompose_tagmarkup`.
+
+        `_tagmarkup_recurse` traverses only `list` instances as containers of parts,
+        while a `tuple` always means a single (display attribute, markup) pair,
+        so `tuple` must not be accepted here.
+        A protocol is used instead of `list["_TagMarkup"]` because `list` is invariant:
+        a plain `list[str | tuple[Hashable, str]]` is not a `list["_TagMarkup"]`.
+        `reverse` is required only to exclude `tuple`, elements are never modified.
+        """
+
+        def __iter__(self) -> Iterator[_TagMarkup]: ...
+
+        def __len__(self) -> int: ...
+
+        def reverse(self) -> None:
+            """Reverse the list of tag markup elements in place."""
+
+    _TagMarkup = str | bytes | tuple[Hashable, "_TagMarkup"] | _TagMarkupList
+
+    _HashableT = typing.TypeVar("_HashableT", bound=Hashable)
+    _HashableS = typing.TypeVar("_HashableS", bound=Hashable)
 
 
-def detect_encoding():
+def __getattr__(name: str) -> typing.Any:
+    """
+    Resolve module attributes that moved to another module, warning about the move.
+
+    :raises AttributeError: *name* is not defined in this module.
+
+    .. deprecated:: 2.6.0
+        Import the name from ``urwid`` instead of ``urwid.util``. This API will be removed in version 6.0.
+    """
+    if hasattr(str_util, name):
+        _deprecation.warn(
+            f"Do not import {name!r} from {__name__}, import it from 'urwid'.",
+            since="2.6.0",
+            removed_in="6.0",
+        )
+        return getattr(str_util, name)
+    raise AttributeError(f"{name} is not defined in {__name__}")
+
+
+def detect_encoding() -> str:
+    """Return the name of the encoding to use for terminal I/O, detected from the platform."""
+    # Windows is a special case:
+    # CMD is Unicode and non-unicode at the same time:
+    # Unicode display support depends on C API usage and partially limited by font settings.
+    # By default, python is distributed in "Unicode" version, and since Python version 3.8 only Unicode.
+    # In case of curses, "windows-curses" is distributed in unicode-only.
+    # Since Windows 10 default console font is already unicode,
+    # in older versions maybe need to set TTF font manually to support more symbols
+    # (this does not affect unicode IO).
+    if sys.platform == "win32" and sys.getdefaultencoding() == "utf-8":
+        return "utf-8"
     # Try to determine if using a supported double-byte encoding
     import locale
-    initial = locale.getlocale()
-    try:
-        try:
-            locale.setlocale(locale.LC_ALL, "")
-        except locale.Error:
-            pass
-        return locale.getlocale()[1] or ""
-    except ValueError as e:
-        # with invalid LANG value python will throw ValueError
-        if e.args and e.args[0].startswith("unknown locale"):
-            return ""
-        else:
-            raise
-    finally:
-        try:
-            locale.setlocale(locale.LC_ALL, initial)
-        except locale.Error:
-            pass
 
-if 'detected_encoding' not in locals():
+    no_set_locale = locale.getpreferredencoding(False)
+
+    if no_set_locale != "ascii":
+        # ascii is fallback locale in case of detect failed
+
+        return no_set_locale
+
+    # Use actual `getpreferredencoding` with public API only
+    old_loc = locale.setlocale(locale.LC_CTYPE)  # == getlocale, but not mangle data
+    try:
+        with suppress(locale.Error):
+            locale.setlocale(locale.LC_CTYPE, "")
+        # internally call private `_get_locale_encoding`
+        return locale.getpreferredencoding(False)
+    finally:
+        with suppress(locale.Error):
+            locale.setlocale(locale.LC_CTYPE, old_loc)
+
+
+if "detected_encoding" not in locals():
     detected_encoding = detect_encoding()
 else:
-    assert 0, "It worked!"
+    raise RuntimeError("Encoding detection broken")
 
-_target_encoding = None
+_target_encoding = "ascii"
 _use_dec_special = True
+# Fallbacks as passed to `set_ascii_fallbacks`, returned by `get_ascii_fallbacks`; replaced, never mutated.
+_ascii_fallbacks: Mapping[str, str] = MappingProxyType({})
+# The same fallbacks in the form the encoder outputs: a DEC drawing character value is already its SO/SI sequence.
+_ascii_fallback_table: dict[str, str] = {}
 
 
-def set_encoding( encoding ):
-    """
-    Set the byte encoding to assume when processing strings and the
-    encoding to use when converting unicode strings.
-    """
+def set_encoding(encoding: str) -> None:
+    """Set the byte encoding to assume for processing strings, and to use when converting unicode strings."""
     encoding = encoding.lower()
 
-    global _target_encoding, _use_dec_special
+    global _target_encoding, _use_dec_special  # noqa: PLW0603  # noqa: PLW0603  # pylint: disable=global-statement
 
-    if encoding in ( 'utf-8', 'utf8', 'utf' ):
+    if encoding in {"utf-8", "utf8", "utf"}:
         str_util.set_byte_encoding("utf8")
 
         _use_dec_special = False
-    elif encoding in ( 'euc-jp' # JISX 0208 only
-            , 'euc-kr', 'euc-cn', 'euc-tw' # CNS 11643 plain 1 only
-            , 'gb2312', 'gbk', 'big5', 'cn-gb', 'uhc'
-            # these shouldn't happen, should they?
-            , 'eucjp', 'euckr', 'euccn', 'euctw', 'cncb' ):
+    elif encoding in {
+        "euc-jp",  # JISX 0208 only
+        "euc-kr",
+        "euc-cn",
+        "euc-tw",  # CNS 11643 plain 1 only
+        "gb2312",
+        "gbk",
+        "big5",
+        "cn-gb",
+        "uhc",
+        # these shouldn't happen, should they?
+        "eucjp",
+        "euckr",
+        "euccn",
+        "euctw",
+        "cncb",
+    }:
         str_util.set_byte_encoding("wide")
 
         _use_dec_special = True
@@ -95,168 +171,292 @@ def set_encoding( encoding ):
         _use_dec_special = True
 
     # if encoding is valid for conversion from unicode, remember it
-    _target_encoding = 'ascii'
-    try:
+    _target_encoding = "ascii"
+    with contextlib.suppress(LookupError):
         if encoding:
-            u"".encode(encoding)
+            "".encode(encoding)
             _target_encoding = encoding
-    except LookupError: pass
 
 
-def get_encoding_mode():
+def get_encoding() -> str:
+    """Get target encoding."""
+    return _target_encoding
+
+
+@contextlib.contextmanager
+def set_temporary_encoding(encoding_name: str) -> Generator[None]:
+    """Temporarily set the target encoding, for encoding-specific validation in unittests/doctests.
+
+    Not exported globally.
     """
-    Get the mode Urwid is using when processing text strings.
-    Returns 'narrow' for 8-bit encodings, 'wide' for CJK encodings
-    or 'utf8' for UTF-8 encodings.
+    old_encoding = _target_encoding
+    try:
+        set_encoding(encoding_name)
+        yield
+    finally:
+        set_encoding(old_encoding)
+
+
+def get_encoding_mode() -> Literal["wide", "narrow", "utf8"]:
+    """Get the mode Urwid is using when processing text strings.
+
+    :returns: 'narrow' for 8-bit encodings, 'wide' for CJK encodings or 'utf8' for UTF-8 encodings.
     """
     return str_util.get_byte_encoding()
 
 
-def apply_target_encoding( s ):
+def set_ascii_fallbacks(fallbacks: Mapping[str, str]) -> None:
+    """Replace the table of replacements for characters the target encoding cannot encode.
+
+    When the target encoding is not UTF-8, a character it cannot encode is output as its fallback from this table,
+    or as ``?`` when the table has none. The table is consulted only for such characters: a character the
+    encoding can encode (``é`` in ISO-8859-1) is output as it is, and the table is not used at all with a UTF-8
+    target encoding.
+
+    The DEC drawing characters listed in :ref:`the manual <unicode-support>` are translated to the terminal's
+    alternate character set before the table is consulted, so a fallback for one of them is never used.
+
+    Text layout measures the original text, so a fallback has to occupy the same single column as the character
+    it replaces:
+
+    * a key is one character, one column wide, and not printable ASCII;
+    * a value is one printable ASCII character or one of the DEC drawing characters, which is output through the
+      alternate character set.
+
+    A ``str`` element of byte text markup uses only the printable ASCII fallbacks, since byte text cannot carry
+    the DEC drawing characters.
+
+    Every call replaces the whole table, and ``{}`` clears it. The mapping is copied, so changing it afterwards
+    has no effect. The table is validated as a whole: when an entry is rejected, the previous table stays in use.
+
+    Canvases rendered before the call keep their old output; call :meth:`urwid.CanvasCache.clear` to redraw them.
+    :mod:`urwid.font` still reports a font that uses a non-DEC character as needing UTF-8, fallback or not.
+
+    >>> import urwid
+    >>> urwid.set_ascii_fallbacks({"\N{BULLET}": "*", "\N{FULL BLOCK}": "\N{BOX DRAWINGS LIGHT VERTICAL}"})
+    >>> urwid.set_ascii_fallbacks({})
+
+    :param fallbacks: replacement character for each character, keyed by the character it replaces.
+    :raises TypeError: a key or a value is not a ``str``.
+    :raises ValueError: a key or a value breaks one of the rules above; the message names it.
+    """
+    # Import locally to warranty no circular imports
+    from urwid.display import escape
+
+    global _ascii_fallbacks, _ascii_fallback_table  # noqa: PLW0603  # pylint: disable=global-statement
+
+    new_fallbacks: dict[str, str] = {}
+    new_table: dict[str, str] = {}
+    for key, value in fallbacks.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise TypeError(f"Fallback {key!r}: {value!r} is not a str to str entry")
+        if len(key) != 1 or " " <= key <= "~" or "\ud800" <= key <= "\udfff" or wcwidth.wcwidth(key) != 1:
+            raise ValueError(f"Fallback key {key!r} is not a single one-column non-ASCII character")
+        if len(value) != 1:
+            raise ValueError(f"Fallback value {value!r} for {key!r} is not a single character")
+        if " " <= value <= "~":
+            new_table[key] = value
+        elif value in escape.DEC_SPECIAL_CHARS:
+            alt = escape.ALT_DEC_SPECIAL_CHARS[escape.DEC_SPECIAL_CHARS.index(value)]
+            new_table[key] = escape.SO + alt + escape.SI
+        else:
+            raise ValueError(f"Fallback value {value!r} for {key!r} is neither printable ASCII nor a DEC character")
+        new_fallbacks[key] = value
+
+    _ascii_fallbacks = MappingProxyType(new_fallbacks)
+    _ascii_fallback_table = new_table
+
+
+def get_ascii_fallbacks() -> Mapping[str, str]:
+    """Return the table set by :func:`set_ascii_fallbacks`, read-only and as it was passed.
+
+    A later :func:`set_ascii_fallbacks` call does not change the returned mapping.
+
+    >>> import urwid
+    >>> urwid.set_ascii_fallbacks({"\N{BULLET}": "*"})
+    >>> dict(urwid.get_ascii_fallbacks())
+    {'\N{BULLET}': '*'}
+    >>> urwid.set_ascii_fallbacks({})
+    """
+    return _ascii_fallbacks
+
+
+def _fallback_errors(exc: UnicodeError, *, ascii_only: bool) -> tuple[str, int]:
+    """Replace the characters the target encoding rejected by their fallbacks, or by ``?``.
+
+    Registered as the ``urwid_fallback`` codec error handler, and with *ascii_only* as ``urwid_fallback_ascii``
+    for output that cannot carry the DEC shift sequences: a DEC drawing character fallback is then ``?`` as well.
+
+    :raises UnicodeError: *exc* is not raised by encoding, re-raised as it is.
+    """
+    if not isinstance(exc, UnicodeEncodeError):
+        raise exc
+    rejected = exc.object[exc.start : exc.end]
+    if not _use_dec_special:
+        return "?" * len(rejected), exc.end
+    parts = (_ascii_fallback_table.get(char, "?") for char in rejected)
+    if ascii_only:
+        # a DEC drawing character value is stored as its three-character SO/SI sequence
+        parts = (part if len(part) == 1 else "?" for part in parts)
+    return "".join(parts), exc.end
+
+
+codecs.register_error("urwid_fallback", functools.partial(_fallback_errors, ascii_only=False))
+codecs.register_error("urwid_fallback_ascii", functools.partial(_fallback_errors, ascii_only=True))
+
+
+def apply_target_encoding(s: str | bytes) -> tuple[bytes, list[tuple[Literal["U", "0"] | None, int]]]:
     """
     Return (encoded byte string, character set rle).
+
+    :raises TypeError: *s* could not be encoded to the target encoding.
     """
-    if _use_dec_special and type(s) == text_type:
+    # Import locally to warranty no circular imports
+    from urwid.display import escape
+
+    if _use_dec_special and isinstance(s, str):
         # first convert drawing characters
-        try:
-            s = s.translate( escape.DEC_SPECIAL_CHARMAP )
-        except NotImplementedError:
-            # python < 2.4 needs to do this the hard way..
-            for c, alt in zip(escape.DEC_SPECIAL_CHARS,
-                    escape.ALT_DEC_SPECIAL_CHARS):
-                s = s.replace( c, escape.SO+alt+escape.SI )
+        s = s.translate(escape.DEC_SPECIAL_CHARMAP)
 
-    if type(s) == text_type:
-        s = s.replace(escape.SI+escape.SO, u"") # remove redundant shifts
-        s = codecs.encode(s, _target_encoding, 'replace')
+    if isinstance(s, str):
+        # remove redundant shifts
+        s = s.replace(escape._SI_SO, "")  # pylint: disable=protected-access
+        # `str.encode` over `codecs.encode`: the latter re-looks-up the codec on every call.
+        s = s.encode(_target_encoding, "urwid_fallback")
 
-    assert isinstance(s, bytes)
-    SO = escape.SO.encode('ascii')
-    SI = escape.SI.encode('ascii')
+    if not isinstance(s, bytes):
+        raise TypeError(s)
+    # Pre-encoded forms of `escape.SO`/`escape.SI`. They live next to the originals so the two cannot
+    # drift apart, and are read here rather than encoded per call because this function runs for every
+    # rendered text segment.
+    SO = escape._SO_BYTES  # pylint: disable=protected-access
+    SI = escape._SI_BYTES  # pylint: disable=protected-access
 
     sis = s.split(SO)
 
-    assert isinstance(sis[0], bytes)
-
-    sis0 = sis[0].replace(SI, bytes())
-    sout = []
-    cout = []
+    sis0 = sis[0].replace(SI, b"")
+    cout: list[tuple[Literal["U", "0"] | None, int]] = []
     if sis0:
-        sout.append( sis0 )
-        cout.append( (None,len(sis0)) )
+        cout.append((None, len(sis0)))
 
-    if len(sis)==1:
+    if len(sis) == 1:
+        # No DEC drawing-character shift in the output: `sout`/`outstr` are never
+        # needed, so skip building the list for this (common) case.
         return sis0, cout
 
+    sout = [sis0] if sis0 else []
     for sn in sis[1:]:
-        assert isinstance(sn, bytes)
-        assert isinstance(SI, bytes)
         sl = sn.split(SI, 1)
         if len(sl) == 1:
             sin = sl[0]
-            assert isinstance(sin, bytes)
             sout.append(sin)
-            rle_append_modify(cout, (escape.DEC_TAG.encode('ascii'), len(sin)))
+            rle_append_modify(cout, (escape.DEC_TAG, len(sin)))
             continue
+
         sin, son = sl
-        son = son.replace(SI, bytes())
+        son = son.replace(SI, b"")
         if sin:
             sout.append(sin)
             rle_append_modify(cout, (escape.DEC_TAG, len(sin)))
+
         if son:
             sout.append(son)
             rle_append_modify(cout, (None, len(son)))
 
-    outstr = bytes().join(sout)
+    outstr = b"".join(sout)
     return outstr, cout
 
 
 ######################################################################
 # Try to set the encoding using the one detected by the locale module
-set_encoding( detected_encoding )
+set_encoding(detected_encoding)
 ######################################################################
 
 
-def supports_unicode():
-    """
-    Return True if python is able to convert non-ascii unicode strings
-    to the current encoding.
-    """
-    return _target_encoding and _target_encoding != 'ascii'
+def supports_unicode() -> bool:
+    """Return True if python is able to convert non-ascii unicode strings to the current encoding."""
+    return bool(_target_encoding and _target_encoding != "ascii")
 
 
-
-
-
-def calc_trim_text( text, start_offs, end_offs, start_col, end_col ):
+def calc_trim_text(
+    text: str | bytes,
+    start_offs: int,
+    end_offs: int,
+    start_col: int,
+    end_col: int,
+) -> tuple[int, int, int, int]:
     """
     Calculate the result of trimming text.
-    start_offs -- offset into text to treat as screen column 0
-    end_offs -- offset into text to treat as the end of the line
-    start_col -- screen column to trim at the left
-    end_col -- screen column to trim at the right
 
-    Returns (start, end, pad_left, pad_right), where:
-    start -- resulting start offset
-    end -- resulting end offset
-    pad_left -- 0 for no pad or 1 for one space to be added
-    pad_right -- 0 for no pad or 1 for one space to be added
+    :param text: text to trim
+    :param start_offs: offset into text to treat as screen column 0
+    :param end_offs: offset into text to treat as the end of the line
+    :param start_col: screen column to trim at the left
+    :param end_col: screen column to trim at the right
+
+    :returns: a ``(start, end, pad_left, pad_right)`` tuple, where ``start`` is the resulting start offset,
+        ``end`` the resulting end offset, and ``pad_left``/``pad_right`` are ``0`` for no pad
+        or ``1`` for one space to be added.
     """
     spos = start_offs
     pad_left = pad_right = 0
     if start_col > 0:
-        spos, sc = calc_text_pos( text, spos, end_offs, start_col )
+        spos, sc = str_util.calc_text_pos(text, spos, end_offs, start_col)
         if sc < start_col:
             pad_left = 1
-            spos, sc = calc_text_pos( text, start_offs,
-                end_offs, start_col+1 )
+            spos, sc = str_util.calc_text_pos(text, start_offs, end_offs, start_col + 1)
     run = end_col - start_col - pad_left
-    pos, sc = calc_text_pos( text, spos, end_offs, run )
+    pos, sc = str_util.calc_text_pos(text, spos, end_offs, run)
     if sc < run:
         pad_right = 1
-    return ( spos, pos, pad_left, pad_right )
+    return (spos, pos, pad_left, pad_right)
 
 
-
-
-def trim_text_attr_cs( text, attr, cs, start_col, end_col ):
-    """
-    Return ( trimmed text, trimmed attr, trimmed cs ).
-    """
-    spos, epos, pad_left, pad_right = calc_trim_text(
-        text, 0, len(text), start_col, end_col )
-    attrtr = rle_subseg( attr, spos, epos )
-    cstr = rle_subseg( cs, spos, epos )
+def trim_text_attr_cs(
+    text: bytes,
+    attr: Sequence[tuple[_HashableT, int]],
+    cs: Sequence[tuple[_HashableS, int]],
+    start_col: int,
+    end_col: int,
+) -> tuple[bytes, list[tuple[_HashableT | None, int]], list[tuple[_HashableS | None, int]]]:
+    """Return ( trimmed text, trimmed attr, trimmed cs )."""
+    spos, epos, pad_left, pad_right = calc_trim_text(text, 0, len(text), start_col, end_col)
+    attrtr: list[tuple[_HashableT | None, int]] = rle_subseg(attr, spos, epos)
+    cstr: list[tuple[_HashableS | None, int]] = rle_subseg(cs, spos, epos)
     if pad_left:
-        al = rle_get_at( attr, spos-1 )
-        rle_prepend_modify( attrtr, (al, 1) )
-        rle_prepend_modify( cstr, (None, 1) )
+        al = rle_get_at(attr, spos - 1)
+        rle_prepend_modify(attrtr, (al, 1))
+        rle_prepend_modify(cstr, (None, 1))
     if pad_right:
-        al = rle_get_at( attr, epos )
-        rle_append_modify( attrtr, (al, 1) )
-        rle_append_modify( cstr, (None, 1) )
+        al = rle_get_at(attr, epos)
+        rle_append_modify(attrtr, (al, 1))
+        rle_append_modify(cstr, (None, 1))
 
-    return (bytes().rjust(pad_left) + text[spos:epos] +
-        bytes().rjust(pad_right), attrtr, cstr)
+    return (b"".rjust(pad_left) + text[spos:epos] + b"".rjust(pad_right), attrtr, cstr)
 
 
-def rle_get_at( rle, pos ):
-    """
-    Return the attribute at offset pos.
-    """
+def rle_get_at(
+    rle: Iterable[tuple[_HashableT, int]],
+    pos: int,
+) -> _HashableT | None:
+    """Return the attribute at offset pos."""
     x = 0
     if pos < 0:
         return None
     for a, run in rle:
-        if x+run > pos:
+        if x + run > pos:
             return a
         x += run
     return None
 
 
-def rle_subseg( rle, start, end ):
-    """Return a sub segment of an rle list."""
-    l = []
+def rle_subseg(
+    rle: Iterable[tuple[_HashableT, int]],
+    start: int,
+    end: int,
+) -> list[tuple[_HashableT, int]]:
+    """Return a sub segment of a rle list."""
+    sub_segment = []
     x = 0
     for a, run in rle:
         if start:
@@ -265,34 +465,40 @@ def rle_subseg( rle, start, end ):
                 x += run
                 continue
             x += start
-            run -= start
+            run -= start  # noqa: PLW2901
             start = 0
         if x >= end:
             break
-        if x+run > end:
-            run = end-x
+        if x + run > end:
+            run = end - x  # noqa: PLW2901
         x += run
-        l.append( (a, run) )
-    return l
+        sub_segment.append((a, run))
+    return sub_segment
 
 
-def rle_len( rle ):
+def rle_len(
+    rle: Iterable[tuple[Hashable, int]],
+) -> int:
+    """Return the number of characters covered by a run length encoded attribute list.
+
+    :raises TypeError: an item of *rle* is not a ``(value, run length)`` tuple.
     """
-    Return the number of characters covered by a run length
-    encoded attribute list.
-    """
-
     run = 0
     for v in rle:
-        assert type(v) == tuple, repr(rle)
-        a, r = v
+        if not isinstance(v, tuple):
+            raise TypeError(rle)
+        _a, r = v
         run += r
     return run
 
-def rle_prepend_modify(rle, a_r):
-    """
-    Append (a, r) (unpacked from *a_r*) to BEGINNING of rle.
-    Merge with first run when possible
+
+def rle_prepend_modify(
+    rle: MutableSequence[tuple[_HashableT, int]],
+    a_r: tuple[_HashableT, int],
+) -> None:
+    """Append (a, r) (unpacked from *a_r*) to BEGINNING of rle.
+
+    Merge with first run when possible.
 
     MODIFIES rle parameter contents. Returns None.
     """
@@ -302,28 +508,35 @@ def rle_prepend_modify(rle, a_r):
     else:
         al, run = rle[0]
         if a == al:
-            rle[0] = (a,run+r)
+            rle[0] = (a, run + r)
         else:
             rle[0:0] = [(a, r)]
 
 
-def rle_append_modify(rle, a_r):
-    """
-    Append (a, r) (unpacked from *a_r*) to the rle list rle.
-    Merge with last run when possible.
+def rle_append_modify(
+    rle: MutableSequence[tuple[_HashableT, int]],
+    a_r: tuple[_HashableT, int],
+) -> None:
+    """Append (a, r) (unpacked from *a_r*) to the rle list rle.
+
+    Merge with the last run when possible.
 
     MODIFIES rle parameter contents. Returns None.
     """
     a, r = a_r
     if not rle or rle[-1][0] != a:
-        rle.append( (a,r) )
+        rle.append((a, r))
         return
-    la,lr = rle[-1]
-    rle[-1] = (a, lr+r)
+    _la, lr = rle[-1]
+    rle[-1] = (a, lr + r)
 
-def rle_join_modify( rle, rle2 ):
-    """
-    Append attribute list rle2 to rle.
+
+def rle_join_modify(
+    rle: MutableSequence[tuple[_HashableT, int]],
+    rle2: Sequence[tuple[_HashableT, int]],
+) -> None:
+    """Append attribute list rle2 to rle.
+
     Merge last run of rle with first run of rle2 when possible.
 
     MODIFIES attr parameter contents. Returns None.
@@ -331,11 +544,16 @@ def rle_join_modify( rle, rle2 ):
     if not rle2:
         return
     rle_append_modify(rle, rle2[0])
-    rle += rle2[1:]
+    # Extend directly from rle2 rather than through a `rle2[1:]` copy.
+    rle.extend(itertools.islice(rle2, 1, None))
 
-def rle_product( rle1, rle2 ):
-    """
-    Merge the runs of rle1 and rle2 like this:
+
+def rle_product(
+    rle1: Sequence[tuple[_HashableT, int]],
+    rle2: Sequence[tuple[_HashableS, int]],
+) -> list[tuple[tuple[_HashableT, _HashableS], int]]:
+    """Merge the runs of rle1 and rle2.
+
     eg.
     rle1 = [ ("a", 10), ("b", 5) ]
     rle2 = [ ("Q", 5), ("P", 10) ]
@@ -343,140 +561,236 @@ def rle_product( rle1, rle2 ):
 
     rle1 and rle2 are assumed to cover the same total run.
     """
-    i1 = i2 = 1 # rle1, rle2 indexes
-    if not rle1 or not rle2: return []
+    i1 = i2 = 1  # rle1, rle2 indexes
+    if not rle1 or not rle2:
+        return []
     a1, r1 = rle1[0]
     a2, r2 = rle2[0]
 
-    l = []
-    while r1 and r2:
-        r = min(r1, r2)
-        rle_append_modify( l, ((a1,a2),r) )
-        r1 -= r
-        if r1 == 0 and i1< len(rle1):
+    result: list[tuple[tuple[_HashableT, _HashableS], int]] = []
+    while True:
+        # Skip zero-length runs (e.g. produced by empty markup segments): they carry no
+        # columns but must not stop the merge early, otherwise following runs are dropped.
+        while r1 == 0 and i1 < len(rle1):
             a1, r1 = rle1[i1]
             i1 += 1
-        r2 -= r
-        if r2 == 0 and i2< len(rle2):
+        while r2 == 0 and i2 < len(rle2):
             a2, r2 = rle2[i2]
             i2 += 1
-    return l
+        if 0 in (r1, r2):
+            break
+
+        r = min(r1, r2)
+        rle_append_modify(result, ((a1, a2), r))
+        r1 -= r
+        r2 -= r
+    return result
 
 
-def rle_factor( rle ):
+class LayeredAttr:
+    """Display attribute made of other display attributes stacked innermost first.
+
+    A screen resolves it by placing each layer over the next one with :meth:`AttrSpec.layered_over`,
+    so a layer whose foreground or background is 'inherit' shows the color of the layer under it.
+    Layers are palette names or :class:`AttrSpec` instances.
     """
-    Inverse of rle_product.
+
+    __slots__ = ("_hash", "_layers")
+
+    def __init__(self, *layers: Hashable) -> None:
+        """Stack *layers*, innermost first.
+
+        A layer that is itself a :class:`LayeredAttr` is replaced by its layers, ``None`` (no attribute) is left out,
+        and a layer repeated next to itself is kept once.
+        """
+        flat: list[Hashable] = []
+        for attr in layers:
+            for layer in attr.layers if isinstance(attr, LayeredAttr) else (attr,):
+                if layer is not None and (not flat or flat[-1] != layer):
+                    flat.append(layer)
+        self._layers = tuple(flat)
+        self._hash = hash((LayeredAttr, self._layers))
+
+    @property
+    def layers(self) -> tuple[Hashable, ...]:
+        """Return the layers, innermost first."""
+        return self._layers
+
+    @classmethod
+    def layer(cls, inner: Hashable, outer: Hashable) -> Hashable:
+        """Return *inner* placed over *outer*.
+
+        ``None`` (no attribute) takes part in no stack: when either is ``None``, *inner* is returned.
+        The stack is built as the constructor builds it, and a single remaining layer is returned as it is
+        rather than wrapped.
+
+        >>> LayeredAttr.layer("red", None)
+        'red'
+        >>> LayeredAttr.layer("red", LayeredAttr.layer("bold", "blue_bg"))
+        LayeredAttr('red', 'bold', 'blue_bg')
+        >>> LayeredAttr.layer("red", "red")
+        'red'
+        """
+        if inner is None or outer is None:
+            return inner
+        stack = cls(inner, outer)
+        return stack.layers[0] if len(stack.layers) == 1 else stack
+
+    def __hash__(self) -> int:
+        """Return the hash of the layers."""
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        """Return whether *other* is a :class:`LayeredAttr` with the same layers."""
+        return isinstance(other, LayeredAttr) and self._layers == other.layers
+
+    def __repr__(self) -> str:
+        """Return an executable python representation."""
+        return f"{self.__class__.__name__}({', '.join(repr(layer) for layer in self._layers)})"
+
+
+class TagMarkupException(Exception):
+    """Raised when tag markup passed to :func:`decompose_tagmarkup` is malformed."""
+
+
+def decompose_tagmarkup(tm: _TagMarkup) -> tuple[str | bytes, list[tuple[Hashable, int]]]:
+    """Return (text string, attribute list) for tagmarkup passed.
+
+    Elements that are not of the type of the first one are converted with the target encoding.
+    A character it cannot encode is replaced by its :func:`set_ascii_fallbacks` entry when that is ASCII,
+    and by ``?`` otherwise: byte text cannot carry the DEC drawing characters.
     """
-    rle1 = []
-    rle2 = []
-    for (a1, a2), r in rle:
-        rle_append_modify( rle1, (a1, r) )
-        rle_append_modify( rle2, (a2, r) )
-    return rle1, rle2
-
-
-class TagMarkupException(Exception): pass
-
-def decompose_tagmarkup(tm):
-    """Return (text string, attribute list) for tagmarkup passed."""
-
     tl, al = _tagmarkup_recurse(tm, None)
-    # join as unicode or bytes based on type of first element
-    text = tl[0][:0].join(tl)
+    # join as str or bytes based on type of first element
+    text: str | bytes
+    converted: list[str] | list[bytes]
+    if tl:
+        encoding = get_encoding()
+        if isinstance(tl[0], str):
+            converted = [item if isinstance(item, str) else item.decode(encoding, "replace") for item in tl]
+            text = "".join(converted)
+        else:
+            converted = [
+                item if isinstance(item, bytes) else item.encode(encoding, "urwid_fallback_ascii") for item in tl
+            ]
+            text = b"".join(converted)
+        if len(text) != sum(len(item) for item in tl):
+            # the attribute runs count the elements before conversion: recount them after it
+            items = zip(tl, converted, strict=True)
+            for i, (attr, run) in enumerate(al):
+                remaining, new_run = run, 0
+                while remaining > 0:
+                    item, converted_item = next(items)
+                    remaining -= len(item)
+                    new_run += len(converted_item)
+                al[i] = (attr, new_run)
+    else:
+        text = ""  # pylint: disable=redefined-variable-type  # declared union type
 
     if al and al[-1][0] is None:
         del al[-1]
 
     return text, al
 
-def _tagmarkup_recurse( tm, attr ):
+
+def _tagmarkup_recurse(
+    tm: _TagMarkup,
+    attr: Hashable,
+) -> tuple[list[str | bytes], list[tuple[Hashable, int]]]:
     """Return (text list, attribute list) for tagmarkup passed.
 
-    tm -- tagmarkup
-    attr -- current attribute or None"""
-
-    if type(tm) == list:
+    :param tm: tagmarkup
+    :param attr: current attribute or None
+    :raises TagMarkupException: an element is neither text nor an ``(attribute, tagmarkup)`` pair.
+    """
+    if isinstance(tm, list):
         # for lists recurse to process each subelement
-        rtl = []
-        ral = []
+        rtl: list[str | bytes] = []
+        ral: list[tuple[Hashable, int]] = []
         for element in tm:
-            tl, al = _tagmarkup_recurse( element, attr )
-            if ral:
+            tl, al = _tagmarkup_recurse(element, attr)
+            if ral and al:
                 # merge attributes when possible
                 last_attr, last_run = ral[-1]
                 top_attr, top_run = al[0]
                 if last_attr == top_attr:
                     ral[-1] = (top_attr, last_run + top_run)
-                    del al[-1]
+                    del al[0]
             rtl += tl
             ral += al
         return rtl, ral
 
-    if type(tm) == tuple:
+    if isinstance(tm, tuple):
         # tuples mark a new attribute boundary
         if len(tm) != 2:
-            raise TagMarkupException("Tuples must be in the form (attribute, tagmarkup): %r" % (tm,))
+            raise TagMarkupException(f"Tuples must be in the form (attribute, tagmarkup): {tm!r}")
 
-        attr, element = tm
-        return _tagmarkup_recurse( element, attr )
+        inner_attr, element = tm
+        return _tagmarkup_recurse(element, LayeredAttr.layer(inner_attr, attr))
 
-    if not isinstance(tm, text_types + (bytes,)):
-        raise TagMarkupException("Invalid markup element: %r" % tm)
+    if not isinstance(tm, (str, bytes)):
+        raise TagMarkupException(f"Invalid markup element: {tm!r}")
 
     # text
     return [tm], [(attr, len(tm))]
 
 
-
-def is_mouse_event( ev ):
-    return type(ev) == tuple and len(ev)==4 and ev[0].find("mouse")>=0
-
-def is_mouse_press( ev ):
-    return ev.find("press")>=0
+def is_mouse_event(ev: tuple[str, int, int, int] | typing.Any) -> bool:
+    """Return whether *ev* is a 4-tuple input event whose name contains "mouse"."""
+    return isinstance(ev, tuple) and len(ev) == 4 and "mouse" in ev[0]
 
 
-
-class MetaSuper(type):
-    """adding .__super"""
-    def __init__(cls, name, bases, d):
-        super(MetaSuper, cls).__init__(name, bases, d)
-        if hasattr(cls, "_%s__super" % name):
-            raise AttributeError("Class has same name as one of its super classes")
-        setattr(cls, "_%s__super" % name, super(cls))
+def is_mouse_press(ev: str) -> bool:
+    """Return whether *ev* is a mouse event name for a button press."""
+    return "press" in ev
 
 
+# Former metaclass, now an alias of `type`: `metaclass=MetaSuper` keeps working, and so does a base list naming it last.
+# The name will be removed in version 7.0.
+MetaSuper = type
 
-def int_scale(val, val_range, out_range):
-    """
-    Scale val in the range [0, val_range-1] to an integer in the range
-    [0, out_range-1].  This implementation uses the "round-half-up" rounding
-    method.
+
+def int_scale(val: int, val_range: int, out_range: int) -> int:
+    """Scale val in the range [0, val_range-1] to an integer in the range [0, out_range-1].
+
+    This implementation uses the "round-half-up" rounding method.
 
     >>> "%x" % int_scale(0x7, 0x10, 0x10000)
     '7777'
-    >>> "%x" % int_scale(0x5f, 0x100, 0x10)
+    >>> "%x" % int_scale(0x5F, 0x100, 0x10)
     '6'
     >>> int_scale(2, 6, 101)
     40
     >>> int_scale(1, 3, 4)
     2
     """
-    num = int(val * (out_range-1) * 2 + (val_range-1))
-    dem = ((val_range-1) * 2)
+    num = val * (out_range - 1) * 2 + (val_range - 1)
+    dem = (val_range - 1) * 2
     # if num % dem == 0 then we are exactly half-way and have rounded up.
     return num // dem
 
 
-class StoppingContext(object):
-    """Context manager that calls ``stop`` on a given object on exit.  Used to
-    make the ``start`` method on `MainLoop` and `BaseScreen` optionally act as
-    context managers.
+class StoppingContext(contextlib.AbstractContextManager["StoppingContext"]):
+    """Context manager that calls ``stop`` on a given object on exit.
+
+    Used to make the ``start`` method on `MainLoop` and `BaseScreen` optionally act as context managers.
     """
-    def __init__(self, wrapped):
+
+    __slots__ = ("_wrapped",)
+
+    def __init__(self, wrapped: CanBeStopped) -> None:
+        """Wrap `wrapped`, whose `stop` method is called on exit."""
         self._wrapped = wrapped
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
+        """Return self, for use as a context manager."""
         return self
 
-    def __exit__(self, *exc_info):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Stop the wrapped object on exiting the context."""
         self._wrapped.stop()

@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# coding: utf-8
 #
 # Urwid tour.  It slices, it dices..
 #    Copyright (C) 2004-2011  Ian Ward
@@ -18,320 +17,627 @@
 #    License along with this library; if not, write to the Free Software
 #    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
-# Urwid web site: http://excess.org/urwid/
+# Urwid web site: https://urwid.org/
 
+"""Urwid tour.
+
+Shows many of the standard widget types and features.
 """
-Urwid tour.  Shows many of the standard widget types and features.
-"""
+
+from __future__ import annotations
 
 import urwid
-import urwid.raw_display
-import urwid.web_display
+from urwid.command_map import Command
 
-def main():
-    text_header = (u"Welcome to the urwid tour!  "
-        u"UP / DOWN / PAGE UP / PAGE DOWN scroll.  F8 exits.")
-    text_intro = [('important', u"Text"),
-        u" widgets are the most common in "
-        u"any urwid program.  This Text widget was created "
-        u"without setting the wrap or align mode, so it "
-        u"defaults to left alignment with wrapping on space "
-        u"characters.  ",
-        ('important', u"Change the window width"),
-        u" to see how the widgets on this page react.  "
-        u"This Text widget is wrapped with a ",
-        ('important', u"Padding"),
-        u" widget to keep it indented on the left and right."]
-    text_right = (u"This Text widget is right aligned.  Wrapped "
-        u"words stay to the right as well. ")
-    text_center = u"This one is center aligned."
-    text_clip = (u"Text widgets may be clipped instead of wrapped.\n"
-        u"Extra text is discarded instead of wrapped to the next line. "
-        u"65-> 70-> 75-> 80-> 85-> 90-> 95-> 100>\n"
-        u"Newlines embedded in the string are still respected.")
-    text_right_clip = (u"This is a right aligned and clipped Text widget.\n"
-        u"<100 <-95 <-90 <-85 <-80 <-75 <-70 <-65             "
-        u"Text will be cut off at the left of this widget.")
-    text_center_clip = (u"Center aligned and clipped widgets will have "
-        u"text cut off both sides.")
-    text_ellipsis = (u"Text can be clipped using the ellipsis character (…)\n"
-        u"Extra text is discarded and a … mark is shown."
-         u"50-> 55-> 60-> 65-> 70-> 75-> 80-> 85-> 90-> 95-> 100>\n"
+PORTS = range(1, 65536)
+PRIVILEGED_PORTS = range(1, 1024)
+COLOURS = ("black", "brown", "dark blue", "dark cyan", "dark green", "dark red", "light blue", "light gray")
+
+
+class ReadlineEdit(urwid.Edit):
+    """Edit that takes the readline editing keys, from its own copy of the shared command map."""
+
+    _command_map = urwid.command_map.copy()
+    _command_map.bind_readline()
+
+
+def main() -> None:
+    """Build and run the tour of standard widget types and features."""
+    text_header = (
+        "Welcome to the urwid tour!  UP / DOWN / PAGE UP / PAGE DOWN scroll.  "
+        "TAB / SHIFT TAB move between fields.  F8 exits."
     )
-    text_any = (u"The 'any' wrap mode will wrap on any character.  This "
-        u"mode will not collapse space characters at the end of the "
-        u"line but it still honors embedded newline characters.\n"
-        u"Like this one.")
-    text_padding = (u"Padding widgets have many options.  This "
-        u"is a standard Text widget wrapped with a Padding widget "
-        u"with the alignment set to relative 20% and with its width "
-        u"fixed at 40.")
-    text_divider =  [u"The ", ('important', u"Divider"),
-        u" widget repeats the same character across the whole line.  "
-        u"It can also add blank lines above and below."]
-    text_edit = [u"The ", ('important', u"Edit"),
-        u" widget is a simple text editing widget.  It supports cursor "
-        u"movement and tries to maintain the current column when focus "
-        u"moves to another edit widget.  It wraps and aligns the same "
-        u"way as Text widgets." ]
-    text_edit_cap1 = ('editcp', u"This is a caption.  Edit here: ")
-    text_edit_text1 = u"editable stuff"
-    text_edit_cap2 = ('editcp', u"This one supports newlines: ")
-    text_edit_text2 = (u"line one starts them all\n"
-        u"== line 2 == with some more text to edit.. words.. whee..\n"
-        u"LINE III, the line to end lines one and two, unless you "
-        u"change something.")
-    text_edit_cap3 = ('editcp', u"This one is clipped, try "
-        u"editing past the edge: ")
-    text_edit_text3 = u"add some text here -> -> -> ...."
-    text_edit_alignments = u"Different Alignments:"
-    text_edit_left = u"left aligned (default)"
-    text_edit_center = u"center aligned"
-    text_edit_right = u"right aligned"
-    text_intedit = ('editcp', [('important', u"IntEdit"),
-        u" allows only numbers: "])
-    text_edit_padding = ('editcp', u"Edit widget within a Padding widget ")
-    text_columns1 = [('important', u"Columns"),
-        u" are used to share horizontal screen space.  "
-        u"This one splits the space into two parts with "
-        u"three characters between each column.  The "
-        u"contents of each column is a single widget."]
-    text_columns2 = [u"When you need to put more than one "
-        u"widget into a column you can use a ",('important',
-        u"Pile"), u" to combine two or more widgets."]
-    text_col_columns = u"Columns may be placed inside other columns."
-    text_col_21 = u"Col 2.1"
-    text_col_22 = u"Col 2.2"
-    text_col_23 = u"Col 2.3"
-    text_column_widths = (u"Columns may also have uneven relative "
-        u"weights or fixed widths.  Use a minimum width so that "
-        u"columns don't become too small.")
-    text_weight = u"Weight %d"
-    text_fixed_9 = u"<Fixed 9>" # should be 9 columns wide
-    text_fixed_14 = u"<--Fixed 14-->" # should be 14 columns wide
-    text_edit_col_cap1 = ('editcp', u"Edit widget within Columns")
-    text_edit_col_text1 = u"here's\nsome\ninfo"
-    text_edit_col_cap2 = ('editcp', u"and within Pile ")
-    text_edit_col_text2 = u"more"
-    text_edit_col_cap3 = ('editcp', u"another ")
-    text_edit_col_text3 = u"still more"
-    text_gridflow = [u"A ",('important', u"GridFlow"), u" widget "
-        u"may be used to display a list of flow widgets with equal "
-        u"widths.  Widgets that don't fit on the first line will "
-        u"flow to the next.  This is useful for small widgets that "
-        u"you want to keep together such as ", ('important', u"Button"),
-        u", ",('important', u"CheckBox"), u" and ",
-        ('important', u"RadioButton"), u" widgets." ]
-    text_button_list = [u"Yes", u"No", u"Perhaps", u"Certainly", u"Partially",
-        u"Tuesdays Only", u"Help"]
-    text_cb_list = [u"Wax", u"Wash", u"Buff", u"Clear Coat", u"Dry",
-        u"Racing Stripe"]
-    text_rb_list = [u"Morning", u"Afternoon", u"Evening", u"Weekend"]
-    text_listbox = [u"All these widgets have been displayed "
-        u"with the help of a ", ('important', u"ListBox"), u" widget.  "
-        u"ListBox widgets handle scrolling and changing focus.  A ",
-        ('important', u"Frame"), u" widget is used to keep the "
-        u"instructions at the top of the screen."]
+    text_intro: list[str | tuple[str, str]] = [
+        ("important", "Text"),
+        (
+            " widgets are the most common in "
+            "any urwid program.  This Text widget was created "
+            "without setting the wrap or align mode, so it "
+            "defaults to left alignment with wrapping on space "
+            "characters.  "
+        ),
+        ("important", "Change the window width"),
+        " to see how the widgets on this page react.  This Text widget is wrapped with a ",
+        ("important", "Padding"),
+        " widget to keep it indented on the left and right.",
+    ]
+    text_right = "This Text widget is right aligned.  Wrapped words stay to the right as well. "
+    text_center = "This one is center aligned."
+    text_clip = (
+        "Text widgets may be clipped instead of wrapped.\n"
+        "Extra text is discarded instead of wrapped to the next line. "
+        "65-> 70-> 75-> 80-> 85-> 90-> 95-> 100>\n"
+        "Newlines embedded in the string are still respected."
+    )
+    text_right_clip = (
+        "This is a right aligned and clipped Text widget.\n"
+        "<100 <-95 <-90 <-85 <-80 <-75 <-70 <-65             "
+        "Text will be cut off at the left of this widget."
+    )
+    text_center_clip = "Center aligned and clipped widgets will have text cut off both sides."
+    text_ellipsis = (
+        "Text can be clipped using the ellipsis character (…)\n"
+        "Extra text is discarded and a … mark is shown."
+        "50-> 55-> 60-> 65-> 70-> 75-> 80-> 85-> 90-> 95-> 100>\n"
+    )
+    text_any = (
+        "The 'any' wrap mode will wrap on any character.  This "
+        "mode will not collapse space characters at the end of the "
+        "line but it still honors embedded newline characters.\n"
+        "Like this one."
+    )
+    text_padding = (
+        "Padding widgets have many options.  This "
+        "is a standard Text widget wrapped with a Padding widget "
+        "with the alignment set to relative 20% and with its width "
+        "fixed at 40."
+    )
+    text_divider: list[str | tuple[str, str]] = [
+        "The ",
+        ("important", "Divider"),
+        " widget repeats the same character across the whole line.  It can also add blank lines above and below.",
+    ]
+    text_edit: list[str | tuple[str, str]] = [
+        "The ",
+        ("important", "Edit"),
+        (
+            " widget is a simple text editing widget.  It supports cursor "
+            "movement and tries to maintain the current column when focus "
+            "moves to another edit widget.  It wraps and aligns the same "
+            "way as Text widgets."
+        ),
+    ]
+    text_edit_cap1 = ("editcp", "This is a caption.  Edit here: ")
+    text_edit_text1 = "editable stuff"
+    text_edit_cap2 = ("editcp", "This one supports newlines: ")
+    text_edit_text2 = (
+        "line one starts them all\n"
+        "== line 2 == with some more text to edit.. words.. whee..\n"
+        "LINE III, the line to end lines one and two, unless you "
+        "change something."
+    )
+    text_edit_cap3 = ("editcp", "This one is clipped, try editing past the edge: ")
+    text_edit_text3 = "add some text here -> -> -> ...."
+    text_edit_cap4 = ("editcp", "This one takes at most 8 characters: ")
+    text_edit_text4 = "12345"
+    text_edit_cap5 = ("editcp", "This one shows a hint while empty and checks the port: ")
+    text_edit_cap6 = ("editcp", "This one completes a colour with TAB: ")
+    text_edit_cap7 = ("editcp", "This one takes readline keys, such as ctrl a, ctrl w, meta b and ctrl _ to undo: ")
+    text_edit_text7 = "ls /usr/local/share"
+    text_edit_alignments = "Different Alignments:"
+    text_edit_left = "left aligned (default)"
+    text_edit_center = "center aligned"
+    text_edit_right = "right aligned"
+    text_intedit: tuple[str, list[str | tuple[str, str]]] = (
+        "editcp",
+        [("important", "IntEdit"), " allows only numbers: "],
+    )
+    text_edit_padding = ("editcp", "Edit widget within a Padding widget ")
+    text_columns1: list[str | tuple[str, str]] = [
+        ("important", "Columns"),
+        (
+            " are used to share horizontal screen space.  "
+            "This one splits the space into two parts with "
+            "three characters between each column.  The "
+            "contents of each column is a single widget."
+        ),
+    ]
+    text_columns2: list[str | tuple[str, str]] = [
+        "When you need to put more than one widget into a column you can use a ",
+        ("important", "Pile"),
+        " to combine two or more widgets.",
+    ]
+    text_col_columns = "Columns may be placed inside other columns."
+    text_col_21 = "Col 2.1"
+    text_col_22 = "Col 2.2"
+    text_col_23 = "Col 2.3"
+    text_column_widths = (
+        "Columns may also have uneven relative "
+        "weights or fixed widths.  Use a minimum width so that "
+        "columns don't become too small."
+    )
+    text_weight = "Weight %d"
+    text_fixed_9 = "<Fixed 9>"  # should be 9 columns wide
+    text_fixed_14 = "<--Fixed 14-->"  # should be 14 columns wide
+    text_edit_col_cap1 = ("editcp", "Edit widget within Columns")
+    text_edit_col_text1 = "here's\nsome\ninfo"
+    text_edit_col_cap2 = ("editcp", "and within Pile ")
+    text_edit_col_text2 = "more"
+    text_edit_col_cap3 = ("editcp", "another ")
+    text_edit_col_text3 = "still more"
+    text_gridflow: list[str | tuple[str, str]] = [
+        "A ",
+        ("important", "GridFlow"),
+        (
+            " widget "
+            "may be used to display a list of flow widgets with equal "
+            "widths.  Widgets that don't fit on the first line will "
+            "flow to the next.  This is useful for small widgets that "
+            "you want to keep together such as "
+        ),
+        ("important", "Button"),
+        ", ",
+        ("important", "CheckBox"),
+        " and ",
+        ("important", "RadioButton"),
+        " widgets.  The ",
+        ("important", "GridFlow"),
+        " of buttons below sets ",
+        ("important", "unfocused_focus_attr"),
+        ", so its focus button stays marked while the focus is elsewhere.",
+    ]
+    text_button_list = ["Yes", "No", "Perhaps", "Certainly", "Partially", "Tuesdays Only", "Help"]
+    text_cb_list = ["Wax", "Wash", "Buff", "Clear Coat", "Dry", "Racing Stripe"]
+    text_rb_list = ["Morning", "Afternoon", "Evening", "Weekend"]
+    text_table: list[str | tuple[str, str]] = [
+        "A ",
+        ("important", "Table"),
+        (
+            " widget lines up rows of cells under a fixed header: every column is as wide as its widest cell, "
+            "a number, or a share of the rest.  This one shows at most four rows at a time, with a scrollbar "
+            "while they do not all fit, and keeps the focused row marked while the focus is elsewhere."
+        ),
+    ]
+    table_rows = [
+        ("urwid", "1.2M", "console user interface library"),
+        ("table.py", "34K", "the widget shown here"),
+        ("tour.py", "18K", "this program"),
+        ("palette", "1", "a single entry"),
+        ("canvas.py", "52K", "what widgets render to"),
+        ("\u4e2d\u6587", "2", "wide characters line up too"),
+    ]
+    text_drop_down: list[str | tuple[str, str]] = [
+        "A ",
+        ("important", "DropDown"),
+        (
+            " widget shows the selected option.  ENTER, SPACE or a mouse click "
+            "opens a list of all the options below it, or above it when there is no room "
+            "below; ESC or a click outside closes the list without a change.  A long list scrolls.  "
+            "The list is a pop-up, so the MainLoop is created with pop_ups=True."
+        ),
+    ]
+    text_drop_down_cap1 = "Color:"
+    text_drop_down_list1 = ["Red", "Green", "Blue", "Cyan", "Magenta", "Yellow"]
+    text_drop_down_cap2 = "Month:"
+    text_drop_down_list2 = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+    text_tabs: list[str | tuple[str, str]] = [
+        "A ",
+        ("important", "Tabs"),
+        (
+            " widget shows one row of tab labels over the body of the selected tab.  "
+            "META RIGHT / META LEFT or a mouse click switch tabs.  UP from the body moves to the label row, "
+            "where LEFT / RIGHT and ENTER pick a tab and DOWN goes back.  "
+            "Make the window narrow to see the label row scroll."
+        ),
+    ]
+    text_listbox: list[str | tuple[str, str]] = [
+        "All these widgets have been displayed with the help of a ",
+        ("important", "ListBox"),
+        " widget.  ListBox widgets handle scrolling and changing focus.  A ",
+        ("important", "Frame"),
+        " widget is used to keep the instructions at the top of the screen.",
+    ]
 
+    def button_press(button: urwid.Button) -> None:
+        frame.footer = urwid.AttrMap(urwid.Text(["Pressed: ", button.get_label()]), "header")
 
-    def button_press(button):
-        frame.footer = urwid.AttrWrap(urwid.Text(
-            [u"Pressed: ", button.get_label()]), 'header')
+    radio_button_group: list[urwid.RadioButton] = []
 
-    radio_button_group = []
+    drop_down_options = (text_drop_down_list1, text_drop_down_list2)
+    drop_down_selected = urwid.Text("")
+
+    def show_drop_down_selection(changed: urwid.DropDown | None = None, new_index: int = 0) -> None:
+        # 'change' is sent before changed.selected moves, so its new option is read from new_index.
+        markup: list[str | tuple[str, str]] = ["Selected: "]
+        for number, (drop_down, options) in enumerate(zip(drop_downs, drop_down_options, strict=True)):
+            index = new_index if drop_down is changed else drop_down.selected
+            if number:
+                markup.append(", ")
+            markup.append(("important", options[index]))
+        drop_down_selected.set_text(markup)
+
+    drop_downs = [
+        urwid.DropDown(drop_down_options[0], attr_map="buttn", focus_map="buttnf"),
+        urwid.DropDown(drop_down_options[1], selected=5, max_visible_items=5, attr_map="buttn", focus_map="buttnf"),
+    ]
+    for drop_down in drop_downs:
+        urwid.connect_signal(drop_down, "change", show_drop_down_selection)
+    show_drop_down_selection()
+    # One width for both, so the two drop-downs line up.
+    drop_down_width = max(drop_down.pack()[0] for drop_down in drop_downs)
 
     blank = urwid.Divider()
-    listbox_content = [
+    listbox_content: list[urwid.widget.AbstractFlowWidget] = [
         blank,
         urwid.Padding(urwid.Text(text_intro), left=2, right=2, min_width=20),
         blank,
-        urwid.Text(text_right, align='right'),
+        urwid.Text(text_right, align=urwid.RIGHT),
         blank,
-        urwid.Text(text_center, align='center'),
+        urwid.Text(text_center, align=urwid.CENTER),
         blank,
-        urwid.Text(text_clip, wrap='clip'),
+        urwid.Text(text_clip, wrap=urwid.CLIP),
         blank,
-        urwid.Text(text_right_clip, align='right', wrap='clip'),
+        urwid.Text(text_right_clip, align=urwid.RIGHT, wrap=urwid.CLIP),
         blank,
-        urwid.Text(text_center_clip, align='center', wrap='clip'),
+        urwid.Text(text_center_clip, align=urwid.CENTER, wrap=urwid.CLIP),
         blank,
-        urwid.Text(text_ellipsis, wrap='ellipsis'),
+        urwid.Text(text_ellipsis, wrap=urwid.ELLIPSIS),
         blank,
-        urwid.Text(text_any, wrap='any'),
+        urwid.Text(text_any, wrap=urwid.ANY),
         blank,
-        urwid.Padding(urwid.Text(text_padding), ('relative', 20), 40),
+        urwid.Padding(urwid.Text(text_padding), (urwid.RELATIVE, 20), 40),
         blank,
-        urwid.AttrWrap(urwid.Divider("=", 1), 'bright'),
+        urwid.AttrMap(urwid.Divider("=", 1), "bright"),
         urwid.Padding(urwid.Text(text_divider), left=2, right=2, min_width=20),
-        urwid.AttrWrap(urwid.Divider("-", 0, 1), 'bright'),
+        urwid.AttrMap(urwid.Divider("-", 0, 1), "bright"),
         blank,
         urwid.Padding(urwid.Text(text_edit), left=2, right=2, min_width=20),
         blank,
-        urwid.AttrWrap(urwid.Edit(text_edit_cap1, text_edit_text1),
-            'editbx', 'editfc'),
+        urwid.AttrMap(urwid.Edit(text_edit_cap1, text_edit_text1), "editbx", "editfc"),
         blank,
-        urwid.AttrWrap(urwid.Edit(text_edit_cap2, text_edit_text2,
-            multiline=True ), 'editbx', 'editfc'),
+        urwid.AttrMap(urwid.Edit(text_edit_cap2, text_edit_text2, multiline=True), "editbx", "editfc"),
         blank,
-        urwid.AttrWrap(urwid.Edit(text_edit_cap3, text_edit_text3,
-            wrap='clip' ), 'editbx', 'editfc'),
+        urwid.AttrMap(urwid.Edit(text_edit_cap3, text_edit_text3, wrap=urwid.CLIP), "editbx", "editfc"),
+        blank,
+        urwid.AttrMap(urwid.Edit(text_edit_cap4, text_edit_text4, max_length=8), "editbx", "editfc"),
+        blank,
+        urwid.AttrMap(
+            urwid.Edit(
+                text_edit_cap5,
+                placeholder=("edithint", "e.g. 8080"),
+                validator=check_port,
+                validation_attr={urwid.Severity.WARNING: "editwarn", urwid.Severity.ERROR: "editerr"},
+                validation_focus_attr={urwid.Severity.WARNING: "editwarnf", urwid.Severity.ERROR: "editerrf"},
+            ),
+            "editbx",
+            "editfc",
+        ),
+        blank,
+        urwid.AttrMap(
+            urwid.Edit(text_edit_cap6, text_completer=complete_colour),
+            "editbx",
+            "editfc",
+        ),
+        blank,
+        urwid.AttrMap(ReadlineEdit(text_edit_cap7, text_edit_text7, undo_limit=50, kill_buffer=[]), "editbx", "editfc"),
         blank,
         urwid.Text(text_edit_alignments),
-        urwid.AttrWrap(urwid.Edit("", text_edit_left, align='left'),
-            'editbx', 'editfc' ),
-        urwid.AttrWrap(urwid.Edit("", text_edit_center,
-            align='center'), 'editbx', 'editfc' ),
-        urwid.AttrWrap(urwid.Edit("", text_edit_right, align='right'),
-            'editbx', 'editfc' ),
+        urwid.AttrMap(urwid.Edit("", text_edit_left, align=urwid.LEFT), "editbx", "editfc"),
+        urwid.AttrMap(urwid.Edit("", text_edit_center, align=urwid.CENTER), "editbx", "editfc"),
+        urwid.AttrMap(urwid.Edit("", text_edit_right, align=urwid.RIGHT), "editbx", "editfc"),
         blank,
-        urwid.AttrWrap(urwid.IntEdit(text_intedit, 123),
-            'editbx', 'editfc' ),
+        urwid.AttrMap(urwid.IntEdit(text_intedit, 123), "editbx", "editfc"),
         blank,
-        urwid.Padding(urwid.AttrWrap(urwid.Edit(text_edit_padding, ""),
-            'editbx','editfc' ), left=10, width=50),
+        urwid.Padding(urwid.AttrMap(urwid.Edit(text_edit_padding, ""), "editbx", "editfc"), left=10, width=50),
         blank,
         blank,
-        urwid.AttrWrap(urwid.Columns([
-            urwid.Divider("."),
-            urwid.Divider(","),
-            urwid.Divider("."),
-            ]), 'bright'),
+        urwid.AttrMap(
+            urwid.Columns(
+                [
+                    urwid.Divider("."),
+                    urwid.Divider(","),
+                    urwid.Divider("."),
+                ]
+            ),
+            "bright",
+        ),
         blank,
-        urwid.Columns([
-            urwid.Padding(urwid.Text(text_columns1), left=2, right=0,
-                min_width=20),
-            urwid.Pile([
-                urwid.Divider("~"),
-                urwid.Text(text_columns2),
-                urwid.Divider("_")])
-            ], 3),
-        blank,
-        blank,
-        urwid.Columns([
-            urwid.Text(text_col_columns),
-            urwid.Columns([
-                urwid.Text(text_col_21),
-                urwid.Text(text_col_22),
-                urwid.Text(text_col_23),
-                ], 1),
-            ], 2),
-        blank,
-        urwid.Padding(urwid.Text(text_column_widths), left=2, right=2,
-            min_width=20),
-        blank,
-        urwid.Columns( [
-            urwid.AttrWrap(urwid.Text(text_weight % 1),'reverse'),
-            ('weight', 2, urwid.Text(text_weight % 2)),
-            ('weight', 3, urwid.AttrWrap(urwid.Text(
-                text_weight % 3), 'reverse')),
-            ('weight', 4, urwid.Text(text_weight % 4)),
-            ('weight', 5, urwid.AttrWrap(urwid.Text(
-                text_weight % 5), 'reverse')),
-            ('weight', 6, urwid.Text(text_weight % 6)),
-            ], 0, min_width=8),
-        blank,
-        urwid.Columns([
-            ('weight', 2, urwid.AttrWrap(urwid.Text(
-                text_weight % 2), 'reverse')),
-            ('fixed', 9, urwid.Text(text_fixed_9)),
-            ('weight', 3, urwid.AttrWrap(urwid.Text(
-                text_weight % 3), 'reverse')),
-            ('fixed', 14, urwid.Text(text_fixed_14)),
-            ], 0, min_width=8),
-        blank,
-        urwid.Columns([
-            urwid.AttrWrap(urwid.Edit(text_edit_col_cap1,
-                text_edit_col_text1, multiline=True),
-                'editbx','editfc'),
-            urwid.Pile([
-                urwid.AttrWrap(urwid.Edit(
-                    text_edit_col_cap2,
-                    text_edit_col_text2),
-                    'editbx','editfc'),
-                blank,
-                urwid.AttrWrap(urwid.Edit(
-                    text_edit_col_cap3,
-                    text_edit_col_text3),
-                    'editbx','editfc'),
-                ]),
-            ], 1),
-        blank,
-        urwid.AttrWrap(urwid.Columns([
-            urwid.Divider("'"),
-            urwid.Divider('"'),
-            urwid.Divider("~"),
-            urwid.Divider('"'),
-            urwid.Divider("'"),
-            ]), 'bright'),
+        urwid.Columns(
+            [
+                urwid.Padding(urwid.Text(text_columns1), left=2, right=0, min_width=20),
+                urwid.Pile([urwid.Divider("~"), urwid.Text(text_columns2), urwid.Divider("_")]),
+            ],
+            3,
+        ),
         blank,
         blank,
-        urwid.Padding(urwid.Text(text_gridflow), left=2, right=2,
-            min_width=20),
+        urwid.Columns(
+            [
+                urwid.Text(text_col_columns),
+                urwid.Columns(
+                    [
+                        urwid.Text(text_col_21),
+                        urwid.Text(text_col_22),
+                        urwid.Text(text_col_23),
+                    ],
+                    1,
+                ),
+            ],
+            2,
+        ),
         blank,
-        urwid.Padding(urwid.GridFlow(
-            [urwid.AttrWrap(urwid.Button(txt, button_press),
-                'buttn','buttnf') for txt in text_button_list],
-            13, 3, 1, 'left'),
-            left=4, right=3, min_width=13),
+        urwid.Padding(urwid.Text(text_column_widths), left=2, right=2, min_width=20),
         blank,
-        urwid.Padding(urwid.GridFlow(
-            [urwid.AttrWrap(urwid.CheckBox(txt),'buttn','buttnf')
-                for txt in text_cb_list],
-            10, 3, 1, 'left') ,
-            left=4, right=3, min_width=10),
+        urwid.Columns(
+            [
+                urwid.AttrMap(urwid.Text(text_weight % 1), "reverse"),
+                (urwid.WEIGHT, 2, urwid.Text(text_weight % 2)),
+                (urwid.WEIGHT, 3, urwid.AttrMap(urwid.Text(text_weight % 3), "reverse")),
+                (urwid.WEIGHT, 4, urwid.Text(text_weight % 4)),
+                (urwid.WEIGHT, 5, urwid.AttrMap(urwid.Text(text_weight % 5), "reverse")),
+                (urwid.WEIGHT, 6, urwid.Text(text_weight % 6)),
+            ],
+            0,
+            min_width=8,
+        ),
         blank,
-        urwid.Padding(urwid.GridFlow(
-            [urwid.AttrWrap(urwid.RadioButton(radio_button_group,
-                txt), 'buttn','buttnf')
-                for txt in text_rb_list],
-            13, 3, 1, 'left') ,
-            left=4, right=3, min_width=13),
+        urwid.Columns(
+            [
+                (urwid.WEIGHT, 2, urwid.AttrMap(urwid.Text(text_weight % 2), "reverse")),
+                (9, urwid.Text(text_fixed_9)),
+                (urwid.WEIGHT, 3, urwid.AttrMap(urwid.Text(text_weight % 3), "reverse")),
+                (14, urwid.Text(text_fixed_14)),
+            ],
+            0,
+            min_width=8,
+        ),
+        blank,
+        urwid.Columns(
+            [
+                urwid.AttrMap(urwid.Edit(text_edit_col_cap1, text_edit_col_text1, multiline=True), "editbx", "editfc"),
+                urwid.Pile(
+                    [
+                        urwid.AttrMap(urwid.Edit(text_edit_col_cap2, text_edit_col_text2), "editbx", "editfc"),
+                        blank,
+                        urwid.AttrMap(urwid.Edit(text_edit_col_cap3, text_edit_col_text3), "editbx", "editfc"),
+                    ],
+                    select_navigation=True,
+                ),
+            ],
+            1,
+            select_navigation=True,
+        ),
+        blank,
+        urwid.AttrMap(
+            urwid.Columns(
+                [
+                    urwid.Divider("'"),
+                    urwid.Divider('"'),
+                    urwid.Divider("~"),
+                    urwid.Divider('"'),
+                    urwid.Divider("'"),
+                ]
+            ),
+            "bright",
+        ),
         blank,
         blank,
-        urwid.Padding(urwid.Text(text_listbox), left=2, right=2,
-            min_width=20),
+        urwid.Padding(urwid.Text(text_gridflow), left=2, right=2, min_width=20),
+        blank,
+        urwid.Padding(
+            urwid.GridFlow(
+                [urwid.AttrMap(urwid.Button(txt, button_press), "buttn", "buttnf") for txt in text_button_list],
+                13,
+                3,
+                1,
+                urwid.LEFT,
+                select_navigation=True,
+                unfocused_focus_attr={"buttn": "buttnl"},
+            ),
+            left=4,
+            right=3,
+            min_width=13,
+        ),
+        blank,
+        urwid.Padding(
+            urwid.GridFlow(
+                [urwid.AttrMap(urwid.CheckBox(txt), "buttn", "buttnf") for txt in text_cb_list],
+                10,
+                3,
+                1,
+                urwid.LEFT,
+                select_navigation=True,
+            ),
+            left=4,
+            right=3,
+            min_width=10,
+        ),
+        blank,
+        urwid.Padding(
+            urwid.GridFlow(
+                [urwid.AttrMap(urwid.RadioButton(radio_button_group, txt), "buttn", "buttnf") for txt in text_rb_list],
+                13,
+                3,
+                1,
+                urwid.LEFT,
+                select_navigation=True,
+            ),
+            left=4,
+            right=3,
+            min_width=13,
+        ),
         blank,
         blank,
-        ]
+        urwid.Padding(urwid.Text(text_table), left=2, right=2, min_width=20),
+        blank,
+        urwid.Padding(
+            urwid.Table(
+                [
+                    urwid.TableColumn("Name"),
+                    urwid.TableColumn("Size", align=urwid.RIGHT, attr="bright"),
+                    urwid.TableColumn("Note", width=(urwid.WEIGHT, 1), wrap=urwid.ELLIPSIS),
+                ],
+                table_rows,
+                header_attr="important",
+                focus_attr={None: "buttnf", "bright": "buttnf"},
+                unfocused_focus_attr={None: "buttnl", "bright": "buttnl"},
+                max_rows=4,
+                scrollbar=None,
+            ),
+            left=4,
+            right=3,
+            min_width=20,
+        ),
+        blank,
+        blank,
+        urwid.Padding(urwid.Text(text_drop_down), left=2, right=2, min_width=20),
+        blank,
+        urwid.Padding(
+            urwid.Columns(
+                [
+                    (7, urwid.Text(text_drop_down_cap1)),
+                    (drop_down_width, urwid.AttrMap(drop_downs[0], "buttn", "buttnf")),
+                ]
+            ),
+            left=4,
+            right=3,
+            min_width=20,
+        ),
+        urwid.Padding(
+            urwid.Columns(
+                [
+                    (7, urwid.Text(text_drop_down_cap2)),
+                    (drop_down_width, urwid.AttrMap(drop_downs[1], "buttn", "buttnf")),
+                ]
+            ),
+            left=4,
+            right=3,
+            min_width=20,
+        ),
+        blank,
+        urwid.Padding(drop_down_selected, left=4, right=3, min_width=20),
+        blank,
+        blank,
+        urwid.Padding(urwid.Text(text_tabs), left=2, right=2, min_width=20),
+        blank,
+        urwid.Padding(
+            urwid.Tabs(
+                [
+                    ("Overview", urwid.Text("Each tab has its own body; only the selected one is drawn.")),
+                    ("Name", urwid.AttrMap(urwid.Edit("Name: "), "editbx", "editfc")),
+                    ("Options", urwid.Pile([urwid.CheckBox("Verbose"), urwid.CheckBox("Dry run")])),
+                ],
+                bar_selectable=True,
+                underline=(urwid.Tabs.Symbols.LINE_LIGHT, urwid.Tabs.Symbols.LINE_HEAVY),
+                attr_map="tab",
+                selected_map="tab selected",
+                focus_map="buttnf",
+            ),
+            left=4,
+            right=3,
+            min_width=20,
+        ),
+        blank,
+        blank,
+        urwid.Padding(urwid.Text(text_listbox), left=2, right=2, min_width=20),
+        blank,
+        blank,
+    ]
 
-    header = urwid.AttrWrap(urwid.Text(text_header), 'header')
-    listbox = urwid.ListBox(urwid.SimpleListWalker(listbox_content))
-    frame = urwid.Frame(urwid.AttrWrap(listbox, 'body'), header=header)
+    header = urwid.AttrMap(urwid.Text(text_header), "header")
+    # select_navigation lets TAB / SHIFT TAB visit every edit, button and check box in order
+    listbox = urwid.ListBox(urwid.SimpleListWalker(listbox_content), select_navigation=True)
+    scrollable = urwid.ScrollBar(
+        listbox,
+        trough_char=urwid.ScrollBar.Symbols.LITE_SHADE,
+        end_markers=(urwid.ScrollBar.Symbols.ARROW_TRIANGLE_UP, urwid.ScrollBar.Symbols.ARROW_TRIANGLE_DOWN),
+        scroll_by_focus=True,
+    )
+    frame: urwid.Frame[
+        urwid.AttrMap[urwid.ScrollBar[urwid.ListBox[int]]],
+        urwid.AttrMap[urwid.Text] | None,
+        urwid.AttrMap[urwid.Text] | None,
+    ] = urwid.Frame(
+        urwid.AttrMap(scrollable, "body"),
+        header=header,
+    )
 
-    palette = [
-        ('body','black','light gray', 'standout'),
-        ('reverse','light gray','black'),
-        ('header','white','dark red', 'bold'),
-        ('important','dark blue','light gray',('standout','underline')),
-        ('editfc','white', 'dark blue', 'bold'),
-        ('editbx','light gray', 'dark blue'),
-        ('editcp','black','light gray', 'standout'),
-        ('bright','dark gray','light gray', ('bold','standout')),
-        ('buttn','black','dark cyan'),
-        ('buttnf','white','dark blue','bold'),
-        ]
-
+    palette: list[tuple[str, str, str] | tuple[str, str, str, str]] = [
+        ("body", "black", "light gray", "standout"),
+        ("reverse", "light gray", "black"),
+        ("header", "white", "dark red", "bold"),
+        ("important", "dark blue", "light gray", "standout,underline"),
+        ("editfc", "white", "dark blue", "bold"),
+        ("editbx", "light gray", "dark blue"),
+        ("editcp", "black", "light gray", "standout"),
+        ("edithint", "light cyan", "dark blue"),
+        ("editwarn", "yellow", "dark blue"),
+        ("editwarnf", "yellow", "dark blue", "bold"),
+        ("editerr", "light red", "dark blue"),
+        ("editerrf", "light red", "dark blue", "bold"),
+        ("bright", "dark gray", "light gray", "bold,standout"),
+        ("buttn", "black", "dark cyan"),
+        ("buttnf", "white", "dark blue", "bold"),
+        ("buttnl", "white", "dark cyan", "bold"),
+        ("tab", "dark gray", "light gray"),
+        ("tab selected", "dark blue", "light gray", "bold"),
+    ]
 
     # use appropriate Screen class
-    if urwid.web_display.is_web_request():
-        screen = urwid.web_display.Screen()
+    if urwid.display.web.is_web_request():
+        screen = urwid.display.web.Screen()
     else:
-        screen = urwid.raw_display.Screen()
+        screen = urwid.display.raw.Screen()
 
-    def unhandled(key):
-        if key == 'f8':
-            raise urwid.ExitMainLoop()
+    def unhandled(key: str | tuple[str, int, int, int]) -> None:
+        if key == "f8":
+            raise urwid.ExitMainLoop
 
-    urwid.MainLoop(frame, palette, screen,
-        unhandled_input=unhandled).run()
+    urwid.command_map.bind(Command.NEXT_TAB, "meta right")
+    urwid.command_map.bind(Command.PREVIOUS_TAB, "meta left")
+    # pop_ups=True adds the PopUpTarget that shows the open DropDown lists.
+    urwid.MainLoop(frame, palette, screen, unhandled_input=unhandled, pop_ups=True).run()
 
-def setup():
-    urwid.web_display.set_preferences("Urwid Tour")
+
+def check_port(text: str) -> urwid.ValidationMessage | str | None:
+    """Return what is wrong with *text* as a TCP port number, or ``None`` for an empty or usable one."""
+    if not text:
+        return None
+    if not text.isdecimal() or int(text) not in PORTS:
+        return "not a port number"
+    if int(text) in PRIVILEGED_PORTS:
+        return urwid.ValidationMessage(urwid.Severity.WARNING, "a privileged port")
+    return None
+
+
+def complete_colour(text: str, pos: int) -> list[tuple[str, int]]:
+    """Return the colours that start with the text before the cursor, none for an empty field."""
+    prefix = text[:pos]
+    return [(name, len(name)) for name in COLOURS if name.startswith(prefix)] if prefix else []
+
+
+def setup() -> None:
+    """Run the tour as a web request when applicable, otherwise as a standalone program."""
+    urwid.display.web.set_preferences("Urwid Tour")
     # try to handle short web requests quickly
-    if urwid.web_display.handle_short_request():
+    if urwid.display.web.handle_short_request():
         return
 
     main()
 
-if '__main__'==__name__ or urwid.web_display.is_web_request():
+
+if __name__ == "__main__" or urwid.display.web.is_web_request():
     setup()
